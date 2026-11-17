@@ -32,6 +32,12 @@ def database(path):
             CREATE TABLE IF NOT EXISTS result(snapshot TEXT, profile TEXT, unit TEXT, data TEXT,
                 PRIMARY KEY(snapshot,profile,unit));
             CREATE TABLE IF NOT EXISTS event(snapshot TEXT, profile TEXT, time TEXT DEFAULT CURRENT_TIMESTAMP, data TEXT);
+            CREATE TABLE IF NOT EXISTS analysis_task(snapshot TEXT, profile TEXT, unit TEXT,
+                state TEXT, metadata TEXT, PRIMARY KEY(snapshot,profile,unit));
+            CREATE TABLE IF NOT EXISTS analysis_connection(snapshot TEXT, profile TEXT, unit TEXT,
+                data TEXT, PRIMARY KEY(snapshot,profile,unit));
+            CREATE TABLE IF NOT EXISTS analysis_dependency(snapshot TEXT, profile TEXT, unit TEXT,
+                target TEXT, PRIMARY KEY(snapshot,profile,unit,target));
             CREATE TABLE IF NOT EXISTS feedback(snapshot TEXT, profile TEXT, unit TEXT,
                 time TEXT DEFAULT CURRENT_TIMESTAMP, data TEXT);
         """)

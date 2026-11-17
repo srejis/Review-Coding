@@ -18,16 +18,30 @@ def data_directory():
 
 def register(db_path, root):
     revision, data = snapshot(root, db_path.parent)
+    from dependency_store import inherit
+    root = str(root.resolve())
     with database(db_path) as db:
-        db.execute("INSERT OR IGNORE INTO snapshot VALUES(?,?,?)",
-                   (revision, str(root.resolve()), encode(data)))
+        inserted = db.execute("INSERT OR IGNORE INTO snapshot VALUES(?,?,?)",
+                              (revision, root, encode(data)))
+        if inserted.rowcount:
+            inherit(db, revision, root, data)
     return revision, data
 
 
 def export(db_path, revision):
     with database(db_path) as db:
         root, snap = load_snapshot(db, revision)
-        return dict(snapshot=revision, root=root, source=snap, results=[
+        return dict(snapshot=revision, root=root, source=snap, tasks=[
+            dict(profile=json.loads(profile), unit=uid, state=state, metadata=json.loads(metadata))
+            for profile, uid, state, metadata in db.execute(
+                "SELECT profile,unit,state,metadata FROM analysis_task WHERE snapshot=?", (revision,))],
+            connections=[dict(profile=json.loads(profile), unit=uid, **json.loads(data))
+                         for profile, uid, data in db.execute(
+                             "SELECT profile,unit,data FROM analysis_connection WHERE snapshot=?", (revision,))],
+            dependencies=[dict(profile=json.loads(profile), unit=uid, target=target)
+                          for profile, uid, target in db.execute(
+                              "SELECT profile,unit,target FROM analysis_dependency WHERE snapshot=?", (revision,))],
+            results=[
             dict(profile=json.loads(profile), unit=uid, **json.loads(data))
             for profile, uid, data in db.execute(
                 "SELECT profile,unit,data FROM result WHERE snapshot=? ORDER BY profile,unit", (revision,))],

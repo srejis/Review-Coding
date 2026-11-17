@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 
+from dependency_store import Checkpoints
 from main import export, register
 from mcp_tools import AnalysisTools
 from source import database, index
@@ -25,7 +26,7 @@ class AnalysisTests(unittest.TestCase):
         self.db = base / "product" / "review.sqlite3"
         self.rev, self.snap = register(self.db, self.root)
         self.unit = next(u for u in self.snap["units"].values() if u["name"] == "g")
-        self.tools = AnalysisTools(self.db, self.rev, "{}", self.unit["id"])
+        self.tools = AnalysisTools(self.db, self.rev, "{}", self.unit["id"], "connection")
 
     def test_snapshot_and_reanalysis(self):
         self.assertIn("bad.py", self.snap["issues"])
@@ -61,19 +62,26 @@ class AnalysisTests(unittest.TestCase):
         edge = dict(kind="call",certainty="confirmed",target=target,
                     evidence=[dict(unit=uid,line=3)],reason="Imported f receives x.")
         with self.assertRaises(ValueError):
-            self.tools.call("submit_relations", {"relations":[edge]})
+            self.tools.call("submit_relations", {"relations":[edge], "dependencies":[target]})
         self.tools.call("read_unit", {"unit": target})
         with self.assertRaises(ValueError):
-            self.tools.call("submit_meaning", dict(role="a",steps=[dict(text="x",sites=["bogus"])],unresolved=[]))
-        self.tools.call("submit_relations", {"relations":[edge]})
+            self.tools.call("submit_meaning", {})
+        self.tools.call("submit_relations", {"relations":[edge], "dependencies":[target]})
+        checkpoint = Checkpoints(self.db, self.rev, "{}")
+        checkpoint.connect(uid, self.tools.staged, self.tools.read_files)
         self.assertEqual(export(self.db, self.rev)["results"], [])
-        self.tools.call("submit_meaning", dict(role="Return twice the input.", steps=[
+        _, connections, deps, _ = checkpoint.read()
+        self.assertEqual(deps[uid], [target])
+        semantic = AnalysisTools(self.db, self.rev, "{}", uid, "semantic")
+        semantic.call("read_unit", {"unit": uid})
+        with self.assertRaises(ValueError):
+            semantic.call("submit_meaning", dict(role="a",steps=[dict(text="x",sites=["bogus"])],unresolved=[]))
+        semantic.call("submit_meaning", dict(role="Return twice the input.", steps=[
             dict(text="Pass x to f and return its result.", sites=[self.unit["sites"][0]["id"]])],
             unresolved=[]))
+        checkpoint.semanticize(uid, semantic.staged["meaning"], connections[uid], [], [], semantic.read_files)
         self.assertEqual(export(self.db, self.rev)["results"][0]["status"], "submitted")
-        restarted = AnalysisTools(self.db, self.rev, "{}", uid)
-        self.assertEqual(restarted.call("get_meaning", {"unit": uid})["missing"], [])
-        self.assertNotIn(uid, [u["id"] for u in restarted.call("get_pending_tasks", {})["units"]])
+        self.assertNotIn(uid, [u["id"] for u in semantic.call("get_pending_tasks", {})["units"]])
 
 
 if __name__ == "__main__":

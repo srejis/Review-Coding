@@ -34,7 +34,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         requests = []
         tools = [
             ("read_unit", dict(unit=uid)),
-            ("submit_relations", dict(relations=[])),
+            ("submit_relations", dict(relations=[], dependencies=[])),
+            ("read_unit", dict(unit=uid)),
             ("submit_meaning", dict(role="Increase the input by one.", unresolved=[],
                                     steps=[dict(text="Add one and return the sum.", sites=[site])]))
         ]
@@ -48,7 +49,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(body["reasoning"], {"effort":"medium"})
             self.assertTrue(body["stream"])
             self.assertFalse(body["store"])
-            if requests:
+            names = {item["name"] for item in body["tools"]}
+            self.assertEqual("submit_relations" in names, len(requests) < 2)
+            self.assertEqual("submit_meaning" in names, len(requests) >= 2)
+            if requests and len(requests) != 2:
                 self.assertEqual(body["input"][-1]["type"], "function_call_output")
             index = len(requests)
             requests.append(body)
@@ -61,7 +65,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         async with provider.client:
             report = await analyze(provider, self.db, self.revision, only=uid)
         self.assertEqual(report["processed"], 1)
-        self.assertEqual(len(requests), 3)
+        self.assertEqual(len(requests), 4)
         saved = export(self.db, self.revision)
         self.assertEqual(saved["results"][0]["meaning"]["missing"], [])
         self.assertEqual(saved["results"][0]["meaning"]["review"], "unreviewed")

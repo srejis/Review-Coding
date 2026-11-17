@@ -1,4 +1,5 @@
 """Validated analysis tools for a single unit and immutable snapshot."""
+import ast
 import json
 
 from source import database, encode, load_snapshot, validate_meaning, validate_relations
@@ -11,7 +12,19 @@ def schema(description, required=(), **properties):
 
 STRING = {"type": "string"}
 INTEGER = {"type": "integer", "minimum": 1}
-OBJECTS = {"type": "array", "items": {"type": "object"}, "maxItems": 150}
+def array(items):
+    return {"type": "array", "items": items, "maxItems": 150}
+
+
+def object_type(**properties):
+    return dict(type="object", properties=properties, required=list(properties), additionalProperties=False)
+
+
+RELATION = object_type(
+    kind={"type": "string", "enum": ["call", "reference", "data", "condition", "state", "contains"]},
+    certainty={"type": "string", "enum": ["confirmed", "candidate", "external", "unresolved"]},
+    target={"type": ["string", "null"], "description": "Exact unit ID or null. confirmed requires a local unit."},
+    evidence=array(object_type(unit=STRING, line=INTEGER)), reason=STRING)
 TOOLS = {
     "list_units": schema("List snapshot units in pages of 50.", page=INTEGER),
     "get_pending_tasks": schema("List pending units in pages of 50.", page=INTEGER),
@@ -23,30 +36,44 @@ TOOLS = {
     "get_relations": schema("Read previously submitted relations.", ("unit",), unit=STRING),
     "get_meaning": schema("Read previously submitted meaning.", ("unit",), unit=STRING),
     "submit_relations": schema(
-        "Submit edges: kind(call/reference/data/condition/state/contains), certainty"
-        "(confirmed/candidate/external/unresolved), target (unit ID or null), "
-        "evidence ([{unit,line}]), reason. Include [] if none.",
-        ("relations",), relations=OBJECTS),
-    "submit_meaning": schema("Submit role, ordered steps [{text,sites:[id]}], and unresolved reasons.",
-                             ("role", "steps", "unresolved"), role=STRING, steps=OBJECTS,
-                             unresolved={"type": "array", "items": STRING, "maxItems": 150}),
+        "Submit connections and exact confirmed local target IDs needed as prior meanings.",
+        ("relations", "dependencies"), relations=array(RELATION), dependencies=array(STRING)),
+    "submit_meaning": schema("Submit only the assigned unit's meaning.",
+                             ("role", "steps", "unresolved"), role=STRING,
+                             steps=array(object_type(text=STRING, sites=array(STRING))),
+                             unresolved=array(STRING)),
+    "revisit_connection": schema("Report a newly discovered local dependency. Does not submit meaning.",
+                                ("target", "evidence", "reason"), target=STRING,
+                                evidence=array(object_type(unit=STRING, line=INTEGER)), reason=STRING),
+}
+
+READ_TOOLS = {"list_units", "get_pending_tasks", "read_unit", "lookup_symbol", "search_code", "get_relations"}
+PHASE_TOOLS = {
+    "connection": READ_TOOLS | {"submit_relations"},
+    "semantic": READ_TOOLS | {"get_meaning", "submit_meaning", "revisit_connection"},
 }
 
 
 class AnalysisTools:
-    def __init__(self, path, revision, profile, uid):
+    def __init__(self, path, revision, profile, uid, phase, dependencies=None, meaning_inputs=None):
         self.path, self.revision, self.profile, self.uid = path, revision, profile, uid
         with database(path) as db:
             _, self.snapshot = load_snapshot(db, revision)
         self.units = self.snapshot["units"]
+        self.phase = phase
+        self.dependencies = set(dependencies or ())
+        self.meaning_inputs = meaning_inputs or {}
         self.read = {}
         self.staged = {}
         self.calls = 0
+        self.trees = {}
 
     def call(self, name, args):
         self.calls += 1
         if self.calls > 48:
             raise ValueError("Tool call limit reached.")
+        if name not in PHASE_TOOLS[self.phase]:
+            raise ValueError("This tool is not available in the current phase.")
         definition = TOOLS[name]["inputSchema"]
         if set(args) - definition["properties"].keys() or set(definition["required"]) - args.keys():
             raise ValueError("Invalid tool arguments.")
@@ -64,9 +91,9 @@ class AnalysisTools:
         try:
             result = self.execute(name, args)
         except (KeyError, TypeError, ValueError) as exc:
-            self.trace(dict(tool=name, arguments=args, error=str(exc)))
+            self.trace(dict(unit=self.uid, phase=self.phase, tool=name, arguments=args, error=str(exc)))
             raise
-        self.trace(dict(tool=name, arguments=args, result=result))
+        self.trace(dict(unit=self.uid, phase=self.phase, tool=name, arguments=args, result=result))
         return result
 
     def trace(self, data):
@@ -99,10 +126,11 @@ class AnalysisTools:
                     raise ValueError("Source line exceeds tool transport limit. Record it as unresolved.")
             self.read.setdefault(unit["id"], set()).update(range(start, end+1))
             parent = self.units.get(unit["parent"])
+            effects = self.effects(unit, start, end) if self.phase == "semantic" else []
             return dict(unit=unit, parent=self.summary(parent) if parent else None, children=[self.summary(u) for u in self.units.values()
                                            if u["parent"] == unit["id"]][:50],
                         start=start, end=end, file_lines=len(lines),
-                        lines=lines[start-1:end])
+                        lines=lines[start-1:end], effects=effects)
         if name == "lookup_symbol":
             return [self.summary(u) for u in self.units.values()
                     if u["name"] == args["name"] and u["kind"] != "block"][:50]
@@ -118,12 +146,17 @@ class AnalysisTools:
                         if len(hits) == 50:
                             return hits
             return hits
-        if name in {"get_relations", "get_meaning"}:
+        if name == "get_meaning":
+            uid = self.units[args["unit"]]["id"]
+            if uid not in self.meaning_inputs:
+                raise ValueError("Only prepared dependency meanings are available.")
+            return self.meaning_inputs[uid]
+        if name == "get_relations":
             uid = self.units[args["unit"]]["id"]
             with database(self.path) as db:
-                row = db.execute("SELECT data FROM result WHERE snapshot=? AND profile=? AND unit=?",
+                row = db.execute("SELECT data FROM analysis_connection WHERE snapshot=? AND profile=? AND unit=?",
                                  (self.revision, self.profile, uid)).fetchone()
-            return json.loads(row[0]).get(name[4:]) if row else None
+            return json.loads(row[0])["relations"] if row else None
 
         if self.uid not in self.read:
             raise ValueError("Read the assigned unit before submitting.")
@@ -134,9 +167,15 @@ class AnalysisTools:
                 if any(ref["line"] not in self.read.get(ref["unit"], set())
                        for ref in relation["evidence"]):
                     raise ValueError("Read the cited source before submitting evidence.")
-                if relation["certainty"] == "confirmed" and relation["target"] not in self.read:
-                    raise ValueError("Read the target before confirming the relationship.")
+                if relation["certainty"] == "confirmed" and (
+                    relation["target"] not in self.read or not any(ref["unit"] == self.uid for ref in relation["evidence"])
+                ):
+                    raise ValueError("Read the target and cite evidence in the assigned unit before confirming.")
+            confirmed = {edge["target"] for edge in relations if edge["certainty"] == "confirmed"}
+            if not set(args["dependencies"]) <= confirmed:
+                raise ValueError("Each meaning dependency must be an exact confirmed local target.")
             self.staged["relations"] = relations
+            self.staged["dependencies"] = sorted(set(args["dependencies"]))
         if name == "submit_meaning":
             unit = self.units[self.uid]
             meaning = validate_meaning(unit, **args)
@@ -147,12 +186,42 @@ class AnalysisTools:
             if meaning["missing"] and not meaning["unresolved"]:
                 raise ValueError("Cover every owned site or explain unresolved coverage.")
             self.staged["meaning"] = meaning
-        if {"relations", "meaning"} <= self.staged.keys():
-            self.staged["status"] = ("partial" if self.staged["meaning"]["missing"] else "submitted")
-            with database(self.path) as db:
-                db.execute("INSERT OR REPLACE INTO result VALUES(?,?,?,?)",
-                           (self.revision, self.profile, self.uid, encode(self.staged)))
-        return {"accepted": True, "saved": "status" in self.staged}
+        if name == "revisit_connection":
+            target = args["target"]
+            if target in self.dependencies:
+                raise ValueError("That dependency was already handled.")
+            edge = dict(kind="reference", certainty="confirmed", target=target,
+                        evidence=args["evidence"], reason=args["reason"])
+            validate_relations(self.units, [edge])
+            if target not in self.read or not any(ref["unit"] == self.uid for ref in edge["evidence"]) or any(
+                ref["line"] not in self.read.get(ref["unit"], ()) for ref in edge["evidence"]
+            ):
+                raise ValueError("Read both units and cite the use in the assigned unit.")
+            self.staged["revisit"] = target
+        return {"accepted": True}
+
+    def effects(self, unit, start, end):
+        file = unit["file"]
+        if file not in self.trees:
+            self.trees[file] = ast.parse(self.snapshot["files"][file]["source"])
+        sites = {(site["line"], site["col"]): site["id"] for site in unit["sites"]
+                 if start <= site["line"] <= end}
+        effects = []
+        for node in ast.walk(self.trees[file]):
+            if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+                continue
+            site = sites.get((node.lineno, node.col_offset))
+            if site is None:
+                continue
+            facts = ["The expression statement discards the call's result."]
+            if isinstance(node.value.func, ast.Attribute):
+                facts.insert(0, "Resolve the callable attribute before evaluating the arguments.")
+            effects.append(dict(site=site, facts=facts))
+        return effects
+
+    @property
+    def read_files(self):
+        return {self.units[uid]["file"] for uid in self.read}
 
     @staticmethod
     def summary(unit):

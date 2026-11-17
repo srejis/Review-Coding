@@ -26,6 +26,12 @@ function SourcePanel({unit, source, lines}: {unit?:Unit; source:string; lines:nu
   </section>
 }
 
+const taskName:Record<string,string> = {
+  NEW:'연결 조사 대기', CONNECTING:'연결 조사 중', WAITING_DEPENDENCIES:'하위 의미 대기',
+  READY_TO_SEMANTICIZE:'의미화 준비', SEMANTICIZING:'의미화 중', SEMANTIC_PARTIAL:'부분 제출',
+  SEMANTIC_SUBMITTED:'의미 제출 · 미검수', QUALITY_VERIFIED:'독립 품질 검증 완료'
+}
+
 function Findings({unit, result, snapshot, navigate, highlight}: {
   unit:Unit; result?:Result; snapshot:Snapshot; navigate:(id:string,line?:number)=>void;
   highlight:(lines:number[])=>void
@@ -33,7 +39,20 @@ function Findings({unit, result, snapshot, navigate, highlight}: {
   const children = Object.values(snapshot.units).filter(child => child.parent === unit.id)
   const incoming = Object.entries(snapshot.results).flatMap(([id, item]) => item.relations
     .filter(edge => edge.target === unit.id && id !== unit.id).map(edge => ({id, edge})))
+  const task=snapshot.tasks[unit.id]
+  const links=result?.status=== "stale" ? [] : snapshot.connections[unit.id]?.relations || result?.relations || []
+  const deps=snapshot.dependencies[unit.id] || []
   return <>
+    {task && <div className="edge">
+      <strong>{taskName[task.state] || task.state}</strong>
+      {task.stale && <p>하위 의미 또는 원본이 바뀌어 재분석이 필요합니다.</p>}
+      {task.waiting?.length ? <p>대기 중인 하위 단위 {task.waiting.map(id=>
+        <button key={id} className="chip" onClick={()=>navigate(id)}>{snapshot.units[id]?.name || id}</button>)}</p> : null}
+      {task.path?.length ? <p>탐색 경로 {task.path.map(id=>snapshot.units[id]?.name || id).join(" → ")}</p> : null}
+      {task.cycle?.length ? <p>순환 {task.cycle.map(id=>snapshot.units[id]?.name || id).join(" ↔ ")}</p> : null}
+    </div>}
+    {deps.length > 0 && <><h2>의미화 선행 의존성</h2>{deps.map(id=>
+      <button key={id} className="chip" onClick={()=>navigate(id)}>{snapshot.units[id]?.name || id}</button>)}</>}
     {result ? <>
       <h2>역할</h2><p className="role">{result.meaning.role}</p>
       <h2>상세 처리</h2><ol className="steps">
@@ -42,22 +61,27 @@ function Findings({unit, result, snapshot, navigate, highlight}: {
           const line = unit.sites.find(site => site.id === id)?.line
           return line === undefined ? [] : [line]
         }))].sort((a,b) => a-b)
-        return <li key={i}><button className="step" onClick={()=>highlight(lines)}>{step.text}
+        return <li key={i}><button className="step" disabled={result.status==="stale"} onClick={()=>highlight(lines)}>{step.text}
           <small>{lines.map(line => `L${line}`).join(' · ')}</small></button></li>
       })}</ol>
-      <p className="muted">구문 대응 {unit.sites.length - result.meaning.missing.length}/{unit.sites.length} · 의미 정확도 미검수</p>
+      <p className="muted">구문 대응 {unit.sites.length - result.meaning.missing.length}/{unit.sites.length} · {task?.state==="QUALITY_VERIFIED" ? "독립 품질 검증 완료" : "의미 정확도 미검수"}</p>
+      {result.dependencies?.length ? <><h2>재사용한 하위 의미</h2>{result.dependencies.map(ref=>
+        <button key={ref.unit} className="chip" onClick={()=>navigate(ref.unit)}>{snapshot.units[ref.unit]?.name} · {ref.version.slice(0,8)}</button>)}</> : null}
+      {result.boundaries?.length ? <><h2>미해결 경계</h2><ul>{result.boundaries.map((boundary,i)=>
+        <li key={i}>{boundary.kind==="cycle" ? "순환 내부" : certainty[boundary.kind] || boundary.kind} · {boundary.reason}</li>)}</ul></> : null}
       {result.meaning.unresolved.length > 0 && <><h2>미해결</h2><ul>{result.meaning.unresolved.map((note,i)=><li key={i}>{note}</li>)}</ul></>}
+    </> : <p className="empty">이 단위의 의미화 결과가 아직 없습니다.</p>}
+    {(result?.status==="stale" || links.length===0) ? null : <>
       <h2>연결 그래프</h2>
       <p className="muted">원본 위치와 조회 이력을 검증합니다. 관계 판정은 모델의 제출입니다.</p>
       <div className="graph-center">{unit.name}</div>
-      <div className="edges">{result.relations.map((edge,i)=><article className="edge" key={i}>
+      <div className="edges">{links.map((edge,i)=><article className="edge" key={i}>
         <div className="edge-label"><span>↳ {edge.kind}</span><span className={`certainty ${edge.certainty}`}>{certainty[edge.certainty]}</span></div>
         {edge.target && <button className="link" onClick={()=>navigate(edge.target!)}>{snapshot.units[edge.target]?.scope || edge.target}</button>}
         <p>{edge.reason}</p><div>{edge.evidence.map((ref,j)=><button className="chip" key={j}
           onClick={()=>navigate(ref.unit,ref.line)}>{snapshot.units[ref.unit]?.file}:{ref.line}</button>)}</div>
       </article>)}</div>
-      {!result.relations.length && <p className="muted">제출된 연결이 없습니다.</p>}
-    </> : <p className="empty">이 단위의 분석 결과가 아직 없습니다.</p>}
+    </>}
     {incoming.length > 0 && <><h2>들어오는 연결</h2>{incoming.map(({id,edge},i)=>
       <button className="chip" key={i} onClick={()=>navigate(id)}>{snapshot.units[id]?.name} → {edge.kind}</button>)}</>}
     {children.length > 0 && <><h2>하위 단위</h2>{children.map(child=>
@@ -116,7 +140,8 @@ function App() {
     events.onmessage=message=>{
       const item=JSON.parse(message.data) as Trace
       setTrace(items=>[...items.slice(-299),item])
-      if (item.event.state === "unit_started" || item.event.tool?.startsWith("submit_")) {
+      if (item.event.state && item.event.state === item.event.state.toUpperCase() ||
+          item.event.state === "connection_saved" || item.event.tool?.startsWith("submit_")) {
         window.clearTimeout(refreshTimer)
         refreshTimer=window.setTimeout(()=>setRefresh(value=>value+1),350)
       }
@@ -139,6 +164,9 @@ function App() {
     else files.set(item.file,[item])
   }
   const result=snapshot?.results[selected]
+  const visibleTrace=trace.filter(item=>!snapshot?.profile || JSON.stringify(item.profile)===JSON.stringify(JSON.parse(snapshot.profile)))
+  const submitted=Object.values(snapshot?.results || {}).filter(value=>value.status==="submitted").length
+  const partial=Object.values(snapshot?.results || {}).filter(value=>value.status==="partial").length
   const active=run?.state === 'running'
   const modelAvailable=Boolean(account?.models.some(item=>item.id===model))
   function navigate(id:string,line?:number) {
@@ -215,10 +243,11 @@ function App() {
             <h2>{file}</h2>{group.map(item=>
             <button key={item.id} className={selected===item.id?'unit active':'unit'} onClick={()=>navigate(item.id)}>
               <span className={snapshot?.results[item.id]?.status==='submitted'?'dot done':'dot'}/>
-              <span><strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}</small></span>
+              <span><strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}{snapshot?.tasks[item.id] &&
+                " · " + taskName[snapshot.tasks[item.id].state]}</small></span>
             </button>)}</section>)}
         </div>
-        <div className="tree-footer">제출 {Object.values(snapshot?.results || {}).filter(value=>value.status==='submitted').length}/{units.length}
+        <div className="tree-footer">제출 {submitted} · 부분 {partial} / {units.length}
           {' · '}파싱 오류 {Object.keys(snapshot?.issues || {}).length}</div>
       </aside>
       <SourcePanel unit={unit} source={unit ? snapshot?.files[unit.file] || '' : ''} lines={highlight}/>
@@ -231,10 +260,19 @@ function App() {
         <div className="review-body">
           {tab==='findings' && (unit && snapshot ? <Findings unit={unit} result={result} snapshot={snapshot} navigate={navigate} highlight={setHighlight}/>
             : <p className="empty">Python 폴더를 등록해 검수를 시작하세요.</p>)}
-          {tab==='events' && (trace.length ? trace.slice().reverse().map(item=><details key={item.id} className="event">
-            <summary>{item.event.tool || item.event.state} <span>{item.time}</span></summary>
+          {tab==='events' && (visibleTrace.length ? visibleTrace.slice().reverse().map(item=><details key={item.id} className="event">
+            <summary>{item.event.tool || taskName[item.event.state || ""] || item.event.state}
+              {item.event.unit && " · " + (snapshot?.units[item.event.unit]?.name || item.event.unit)} <span>{item.time}</span></summary>
+            {item.event.path?.length ? <p>탐색 경로 {item.event.path.map(id=>snapshot?.units[id]?.name || id).join(" → ")}</p> : null}
             <pre>{JSON.stringify(item.event,null,2)}</pre></details>) : <p className="empty">실행 기록이 없습니다.</p>)}
           {tab==='feedback' && <>
+            {snapshot?.tasks[selected]?.state==="SEMANTIC_SUBMITTED" && result?.version &&
+              <button onClick={()=>{if (window.confirm("원본과 모든 설명을 대조해 의미 정확성을 직접 확인했습니까?")) {
+                action(async()=>{
+                  await request('/api/verify',{revision,profile:snapshot.profile,unit:selected,version:result.version})
+                  setRefresh(value=>value+1)
+                })
+              }}}>독립 검증 완료로 표시</button>}
             <form className="feedback" onSubmit={event=>{event.preventDefault();action(async()=>{
               await request('/api/feedback',{revision,profile:snapshot?.profile,unit:selected,category,note})
               setNote('');setRefresh(value=>value+1)

@@ -12,6 +12,7 @@ import webbrowser
 
 from agent import analyze
 from chatgpt_auth import ChatGPTAuth, ServiceError
+from dependency_store import read_state, set_state
 from main import export, register
 from responses import DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, Responses
 from source import database, encode, load_snapshot
@@ -186,20 +187,24 @@ class Handler(BaseHTTPRequestHandler):
         with database(db_path) as db:
             root, snap = load_snapshot(db, revision)
             profiles = [raw for raw, in db.execute(
-                "SELECT profile FROM event WHERE snapshot=? UNION SELECT profile FROM result WHERE snapshot=? "
-                "ORDER BY profile", (revision, revision))]
+                "SELECT profile FROM event WHERE snapshot=? UNION SELECT profile FROM result WHERE snapshot=? UNION SELECT profile FROM analysis_task WHERE snapshot=? "
+                "ORDER BY profile", (revision, revision, revision))]
             latest = db.execute("SELECT profile FROM result WHERE snapshot=? ORDER BY rowid DESC LIMIT 1",
                                 (revision,)).fetchone()
             latest_run = db.execute("SELECT profile FROM event WHERE snapshot=? ORDER BY rowid DESC LIMIT 1",
                                     (revision,)).fetchone()
-            default = latest_run or latest
+            latest_work = db.execute("SELECT profile FROM analysis_task WHERE snapshot=? ORDER BY rowid DESC LIMIT 1",
+                                     (revision,)).fetchone()
+            default = latest_run or latest_work or latest
             profile = query.get("profile", default[0] if default else "")
-            results = {uid: json.loads(raw) for uid, raw in db.execute(
-                "SELECT unit,data FROM result WHERE snapshot=? AND profile=?", (revision, profile))}
+            _, connections, dependencies, results = read_state(db, revision, profile)
+            tasks = {uid: dict(state=state, **json.loads(raw)) for uid, state, raw in db.execute(
+                "SELECT unit,state,metadata FROM analysis_task WHERE snapshot=? AND profile=?", (revision, profile))}
             feedback = [dict(unit=uid, time=stamp, **json.loads(raw)) for uid, stamp, raw in db.execute(
                 "SELECT unit,time,data FROM feedback WHERE snapshot=? AND profile=?", (revision, profile))]
         self.json(dict(root=root, profiles=profiles, profile=profile, units=snap["units"],
-                       results=results, feedback=feedback, issues=snap["issues"],
+                       results=results, tasks=tasks, connections=connections, dependencies=dependencies,
+                       feedback=feedback, issues=snap["issues"],
                        files={name: file["source"] for name, file in snap["files"].items()}))
 
     def events(self, revision, after):
@@ -252,6 +257,18 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.job and self.server.job.thread.is_alive():
                     self.server.job.cancel()
             self.json({"state": "cancellation_requested"})
+        elif path == "/api/verify":
+            revision, profile, unit, version = (data[k] for k in ("revision", "profile", "unit", "version"))
+            with database(db_path) as db:
+                row = db.execute(
+                    "SELECT t.state,r.data FROM analysis_task t JOIN result r USING(snapshot,profile,unit) "
+                    "WHERE t.snapshot=? AND t.profile=? AND t.unit=?", (revision, profile, unit)).fetchone()
+                if not row or row[0] != "SEMANTIC_SUBMITTED" or json.loads(row[1]).get("version") != version:
+                    raise ValueError("Independent verification requires the current complete submission.")
+                set_state(db, revision, profile, unit, "QUALITY_VERIFIED", {"version": version})
+                db.execute("INSERT INTO event(snapshot,profile,data) VALUES(?,?,?)",
+                           (revision, profile, encode(dict(state="QUALITY_VERIFIED", unit=unit, version=version))))
+            self.json({"saved": True})
         elif path == "/api/feedback":
             revision, profile, unit = (data[k] for k in ("revision", "profile", "unit"))
             note = data["note"].strip()

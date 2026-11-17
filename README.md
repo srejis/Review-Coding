@@ -62,3 +62,30 @@ v2의 실행 프로필은 별도로 기록합니다. v1에서 사용한 Codex �
 
 공식 연동 문서: [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) ·
 [모델 조회와 Responses 스트리밍](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+
+## 의존성 기반 분석
+
+연결 조사와 의미화는 별도의 모델 실행입니다. 연결 조사가 확인한 로컬 선행 의존성
+중 아직 의미가 없는 단위로 내려갑니다. 하위 결과가 준비되면 그 버전을 기록하고 상위
+의미화를 재개합니다. 연결·의존성·진행 상태는 SQLite에 별도로 체크포인트됩니다.
+중단되면 저장된 연결 조사와 하위 결과를 재사용합니다.
+
+순환 그룹의 외부 의존성을 먼저 처리합니다. 순환 내부와 런타임 경계는 확인 가능한
+실행 효과 및 미해결 사유를 기록합니다. 모델 제출과 사람이 원본을 직접 대조해 기록한
+독립 품질 검증은 서로 다른 상태입니다.
+
+같은 경로를 다시 등록하면 변경 파일과 조회했던 근거를 비교합니다. 영향받는 상위
+결과는 오래된 상태로 표시되고, 영향을 받지 않은 같은 프로필의 결과를 재사용합니다.
+후보·미해결 연결의 경우 소스가 달라지면 보수적으로 재조사합니다.
+
+포함된 사례에서 상위 요청으로 시작하려면 check_cases를 먼저 등록하고, 반환된 해시로
+아래 명령을 실행합니다. --limit은 요청의 시작 단위 수를 제한합니다. 필요한 하위 단위는
+같은 실행에서 처리하며 시간과 단계 수 상한을 적용합니다.
+
+~~~powershell
+.\.venv\Scripts\python.exe -B main.py register .\check_cases
+.\.venv\Scripts\python.exe -B main.py analyze SNAPSHOT --unit 'scores.py:4:1' --limit 1
+.\.venv\Scripts\python.exe -B main.py export SNAPSHOT
+~~~
+
+JSON에는 단계별 Trace, 대기 경로, 하위 의미 버전, 미해결 경계가 포함됩니다.
