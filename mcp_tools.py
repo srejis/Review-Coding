@@ -1,7 +1,5 @@
-"""Bounded stdio MCP server for a single unit and immutable snapshot."""
+"""Validated analysis tools for a single unit and immutable snapshot."""
 import json
-from pathlib import Path
-import sys
 
 from source import database, encode, load_snapshot, validate_meaning, validate_relations
 
@@ -159,38 +157,3 @@ class AnalysisTools:
     @staticmethod
     def summary(unit):
         return {k: v for k, v in unit.items() if k != "sites"}
-
-
-def serve(tools):
-    for line in sys.stdin:
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if "id" not in msg:
-            continue
-        method = msg.get("method")
-        params = msg.get("params", {})
-        response = {"jsonrpc": "2.0", "id": msg["id"]}
-        if method == "initialize":
-            response["result"] = dict(protocolVersion=params.get("protocolVersion", "2024-11-05"),
-                                      capabilities={"tools": {}},
-                                      serverInfo={"name": "code_review", "version": "1"})
-        elif method == "ping":
-            response["result"] = {}
-        elif method == "tools/list":
-            response["result"] = {"tools": [dict(name=name, **data) for name, data in TOOLS.items()]}
-        elif method == "tools/call":
-            try:
-                value = tools.call(params["name"], params.get("arguments", {}))
-                response["result"] = {"content": [{"type": "text", "text": encode(value)}]}
-            except (KeyError, ValueError, TypeError) as exc:
-                response["result"] = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
-        else:
-            response["error"] = {"code": -32601, "message": "Method not found"}
-        print(json.dumps(response, ensure_ascii=True), flush=True)
-
-
-if __name__ == "__main__":
-    sys.stdin.reconfigure(encoding="utf-8")
-    serve(AnalysisTools(Path(sys.argv[1]), *sys.argv[2:5]))

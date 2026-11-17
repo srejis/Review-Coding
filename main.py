@@ -57,8 +57,7 @@ def main():
     parser.add_argument("--data", type=Path, default=data_directory())
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
-    sign_in = sub.add_parser("login")
-    sign_in.add_argument("--device", action="store_true")
+    sub.add_parser("login")
     add = sub.add_parser("register")
     add.add_argument("root", type=Path)
     run = sub.add_parser("analyze")
@@ -71,30 +70,42 @@ def main():
     run.add_argument("--cancel-file", type=Path, help=argparse.SUPPRESS)
     out = sub.add_parser("export")
     out.add_argument("snapshot")
-    sub.add_parser("review")
+    ui = sub.add_parser("review")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     data = args.data.resolve()
     db_path = data / "review.sqlite3"
-    from codex_runtime import analyze, catalog, login
+    from agent import analyze
+    from chatgpt_auth import ChatGPTAuth
+    from responses import DEFAULT_EFFORT, DEFAULT_MODEL, Responses
+    from review_server import account_models, serve
+
+    auth = ChatGPTAuth(data / "chatgpt")
+
+    async def run_analysis():
+        token = await asyncio.to_thread(auth.token)
+        provider = Responses(token)
+        async with provider.client:
+            return await analyze(provider, db_path, args.snapshot, args.model or DEFAULT_MODEL,
+                                 args.effort or DEFAULT_EFFORT, args.limit, args.seconds, args.unit)
     try:
         match args.command:
             case "status":
-                value = asyncio.run(catalog(data))
+                value = asyncio.run(account_models(auth))
             case "login":
-                value = dict(auth=asyncio.run(login(data, args.device)))
+                serve(data, 0, signin=True)
+                return
             case "register":
                 revision, snap = register(db_path, args.root)
                 value = dict(snapshot=revision, units=len(snap["units"]), issues=snap["issues"],
                              excluded=snap["excluded"], database=str(db_path))
             case "analyze":
-                value = asyncio.run(run_cancellable(
-                    analyze(data, db_path, args.snapshot, args.model, args.effort, args.limit, args.seconds, args.unit),
-                    args.cancel_file))
+                value = asyncio.run(run_cancellable(run_analysis(), args.cancel_file))
             case "export":
                 value = export(db_path, args.snapshot)
             case "review":
-                from review_ui import review
-                review(data, db_path)
+                serve(data, args.port, not args.no_browser)
                 return
         print(json.dumps(value, ensure_ascii=False, indent=2))
     except KeyboardInterrupt:

@@ -1,0 +1,254 @@
+import {useEffect, useRef, useState} from 'react'
+import {createRoot} from 'react-dom/client'
+import {LUNA, request} from './api'
+import type {Account, Project, Result, Run, Snapshot, Trace, Unit} from './api'
+import './style.css'
+
+const categoryOptions = ['검수 메모','설명 누락','잘못된 연결','너무 추상적','근거 없는 의미']
+const certainty: Record<string,string> = { confirmed:'근거 포함 · 모델 확정', candidate:'후보', unresolved:'미해결', external:'외부 경계' }
+const profileLabel = (raw: string) => {
+  const p = JSON.parse(raw)
+  return [p.model, p.effort, p.engine || '이전 실행', p.prompt_hash?.slice(0,7)].filter(Boolean).join(' · ')
+}
+
+function SourcePanel({unit, source, lines}: {unit?:Unit; source:string; lines:number[]}) {
+  const marked = useRef<HTMLDivElement>(null)
+  useEffect(() => { marked.current?.scrollIntoView({block:'nearest'}) }, [lines, unit?.id])
+  return <section className="source panel" aria-label="원본 코드">
+    <div className="panel-title"><strong>원본 코드</strong><span>{unit?.file || 'Python'}</span></div>
+    {unit ? <div className="code" tabIndex={0}>
+      {source.split(/\r?\n/).map((line, index) => {
+        const number = index + 1
+        return <div className={lines.includes(number) ? 'line highlighted' : 'line'} key={number}
+          ref={number === lines[0] ? marked : undefined}><span>{number}</span><code>{line || ' '}</code></div>
+      })}
+    </div> : <div className="empty">분석 단위를 선택하면 원본이 표시됩니다.</div>}
+  </section>
+}
+
+function Findings({unit, result, snapshot, navigate, highlight}: {
+  unit:Unit; result?:Result; snapshot:Snapshot; navigate:(id:string,line?:number)=>void;
+  highlight:(lines:number[])=>void
+}) {
+  const children = Object.values(snapshot.units).filter(child => child.parent === unit.id)
+  const incoming = Object.entries(snapshot.results).flatMap(([id, item]) => item.relations
+    .filter(edge => edge.target === unit.id && id !== unit.id).map(edge => ({id, edge})))
+  return <>
+    {result ? <>
+      <h2>역할</h2><p className="role">{result.meaning.role}</p>
+      <h2>상세 처리</h2><ol className="steps">
+      {result.meaning.steps.map((step,i) => {
+        const lines = [...new Set(step.sites.flatMap(id => {
+          const line = unit.sites.find(site => site.id === id)?.line
+          return line === undefined ? [] : [line]
+        }))].sort((a,b) => a-b)
+        return <li key={i}><button className="step" onClick={()=>highlight(lines)}>{step.text}
+          <small>{lines.map(line => `L${line}`).join(' · ')}</small></button></li>
+      })}</ol>
+      <p className="muted">구문 대응 {unit.sites.length - result.meaning.missing.length}/{unit.sites.length} · 의미 정확도 미검수</p>
+      {result.meaning.unresolved.length > 0 && <><h2>미해결</h2><ul>{result.meaning.unresolved.map((note,i)=><li key={i}>{note}</li>)}</ul></>}
+      <h2>연결 그래프</h2>
+      <p className="muted">원본 위치와 조회 이력을 검증합니다. 관계 판정은 모델의 제출입니다.</p>
+      <div className="graph-center">{unit.name}</div>
+      <div className="edges">{result.relations.map((edge,i)=><article className="edge" key={i}>
+        <div className="edge-label"><span>↳ {edge.kind}</span><span className={`certainty ${edge.certainty}`}>{certainty[edge.certainty]}</span></div>
+        {edge.target && <button className="link" onClick={()=>navigate(edge.target!)}>{snapshot.units[edge.target]?.scope || edge.target}</button>}
+        <p>{edge.reason}</p><div>{edge.evidence.map((ref,j)=><button className="chip" key={j}
+          onClick={()=>navigate(ref.unit,ref.line)}>{snapshot.units[ref.unit]?.file}:{ref.line}</button>)}</div>
+      </article>)}</div>
+      {!result.relations.length && <p className="muted">제출된 연결이 없습니다.</p>}
+    </> : <p className="empty">이 단위의 분석 결과가 아직 없습니다.</p>}
+    {incoming.length > 0 && <><h2>들어오는 연결</h2>{incoming.map(({id,edge},i)=>
+      <button className="chip" key={i} onClick={()=>navigate(id)}>{snapshot.units[id]?.name} → {edge.kind}</button>)}</>}
+    {children.length > 0 && <><h2>하위 단위</h2>{children.map(child=>
+      <button className="chip" key={child.id} onClick={()=>navigate(child.id)}>{child.name} · L{child.line}</button>)}</>}
+  </>
+}
+
+function App() {
+  const [projects,setProjects]=useState<Project[]>([])
+  const [revision,setRevision]=useState('')
+  const [snapshot,setSnapshot]=useState<Snapshot>()
+  const [profile,setProfile]=useState('')
+  const [selected,setSelected]=useState('')
+  const [account,setAccount]=useState<Account>()
+  const [accountChoice,setAccountChoice]=useState('')
+  const [model,setModel]=useState(LUNA)
+  const [effort,setEffort]=useState('medium')
+  const [folder,setFolder]=useState('')
+  const [filter,setFilter]=useState('')
+  const [tab,setTab]=useState<'findings'|'events'|'feedback'>('findings')
+  const [highlight,setHighlight]=useState<number[]>([])
+  const [trace,setTrace]=useState<Trace[]>([])
+  const [run,setRun]=useState<Run>()
+  const [error,setError]=useState('')
+  const [category,setCategory]=useState(categoryOptions[0])
+  const [note,setNote]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [refresh,setRefresh]=useState(0)
+
+  useEffect(() => {
+    request<Project[]>('/api/projects').then(rows=>{setProjects(rows);setRevision(rows[0]?.id || '')})
+      .catch(e=>setError(e.message))
+    request<Account>('/api/account').then(value=>{setAccount(value);setAccountChoice(value.active || '')})
+      .catch(e=>setError(e.message))
+    const login = new URLSearchParams(location.search).get('login')
+    if (login && login !== 'connected') setError(`ChatGPT 로그인 실패 · ${login}`)
+  }, [])
+
+  useEffect(() => {
+    if (!revision) return
+    let current=true
+    const query=new URLSearchParams({revision})
+    if (profile) query.set('profile',profile)
+    request<Snapshot>(`/api/snapshot?${query}`).then(value=>{
+      if (!current) return
+      setSnapshot(value)
+      setSelected(previous=>value.units[previous] ? previous : Object.keys(value.units)[0] || '')
+    }).catch(e=>{if (current) setError(e.message)})
+    return ()=>{current=false}
+  }, [revision, profile, refresh])
+
+  useEffect(() => {
+    if (!revision) return
+    const events=new EventSource(`/api/events?revision=${encodeURIComponent(revision)}`)
+    let refreshTimer: number | undefined
+    events.onmessage=message=>{
+      const item=JSON.parse(message.data) as Trace
+      setTrace(items=>[...items.slice(-299),item])
+      if (item.event.state === "unit_started" || item.event.tool?.startsWith("submit_")) {
+        window.clearTimeout(refreshTimer)
+        refreshTimer=window.setTimeout(()=>setRefresh(value=>value+1),350)
+      }
+    }
+    events.addEventListener('run', event=>{
+      const state=JSON.parse(event.data) as Run
+      setRun(state)
+      if (state.state !== 'running') setRefresh(value=>value+1)
+    })
+    return ()=>{events.close();window.clearTimeout(refreshTimer)}
+  }, [revision])
+
+  const unit=snapshot?.units[selected]
+  const units=Object.values(snapshot?.units || {})
+  const files=new Map<string,Unit[]>()
+  for (const item of units.filter(item=>item.scope.toLowerCase().includes(filter.toLowerCase()))
+    .sort((a,b)=>a.file.localeCompare(b.file) || a.line-b.line)) {
+    const group=files.get(item.file)
+    if (group) group.push(item)
+    else files.set(item.file,[item])
+  }
+  const result=snapshot?.results[selected]
+  const active=run?.state === 'running'
+  const modelAvailable=Boolean(account?.models.some(item=>item.id===model))
+  function navigate(id:string,line?:number) {
+    setSelected(id)
+    setHighlight([line ?? snapshot?.units[id]?.line ?? 1])
+  }
+  function switchProject(id:string) {
+    setSnapshot(undefined);setRevision(id);setProfile('');setSelected('')
+    setHighlight([]);setTrace([]);setRun(undefined)
+  }
+  async function action(work:()=>Promise<void>) {
+    setError('');setBusy(true)
+    try { await work() } catch(e) { setError(e instanceof Error ? e.message : '요청 실패') }
+    finally {setBusy(false)}
+  }
+  const login=()=>action(async()=>{
+    const {url}=await request<{url:string}>('/api/login',{account:accountChoice || undefined})
+    location.assign(url)
+  })
+  const register=()=>action(async()=>{
+    const {id}=await request<{id:string}>('/api/register',{root:folder})
+    setProjects(await request<Project[]>('/api/projects'));switchProject(id);setFolder('')
+  })
+  const analyze=(id?:string)=>action(async()=>{
+    setRun(await request<Run>('/api/analyze',{revision,model,effort,unit:id}))
+    setProfile('');setTab('events')
+  })
+
+  return <main className="shell">
+    <header className="top">
+      <div className="title"><span className="brand">RC</span><div><h1>Review-Coding</h1><p>Python 코드 검수</p></div></div>
+      <div className="auth">
+        {account?.accounts.length ? <select aria-label="ChatGPT 계정" value={accountChoice}
+          onChange={event=>setAccountChoice(event.target.value)}>
+          {account.accounts.map(choice=><option key={choice.id} value={choice.id}>{choice.label} · {choice.id.slice(-5)}</option>)}
+          <option value="">다른 계정 연결</option>
+        </select> : null}
+        {account?.auth==='chatgpt_plan_oauth' && <span className="connected">ChatGPT 연결됨</span>}
+        <button disabled={busy} data-oai-siwc-button onClick={login}>Continue with ChatGPT</button>
+      </div>
+    </header>
+    <section className="toolbar" aria-label="분석 실행">
+      <label>모델<select value={model} onChange={event=>setModel(event.target.value)}>
+        <option value={LUNA}>GPT-6 Luna</option>
+        {account?.models.filter(item=>item.id!==LUNA).map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>
+      <label>추론<select value={effort} onChange={event=>setEffort(event.target.value)}>
+        {(account?.efforts || ['medium']).map(value=><option key={value}>{value}</option>)}
+      </select></label>
+      <button className="primary" disabled={!revision || !modelAvailable || busy || active} onClick={()=>analyze()}>분석·재개</button>
+      <button disabled={!unit || !modelAvailable || busy || active} onClick={()=>analyze(selected)}>선택 단위 분석</button>
+      {active && <button onClick={()=>action(async()=>{await request('/api/cancel',{})})}>중단</button>}
+      {run && <span className="muted" role="status">{run.error || ({running:'분석 중',partial:'부분 분석',unit_limit:'단위 한도 도달',finished:'완료',cancelled:'중단됨',time_limit:'시간 한도 도달'}[run.state] || run.state)}
+        {run.remaining !== undefined && ` · 남은 단위 ${run.remaining}개`}</span>}
+      {!modelAvailable && <span className="muted">{account?.problem}</span>}
+    </section>
+    {error && <div role="alert" className="alert">{error}</div>}
+    <div className="workspace">
+      <aside className="tree panel">
+        <div className="panel-title"><strong>프로젝트</strong><span>{projects.length}개 스냅샷</span></div>
+        <div className="tree-controls">
+          <form onSubmit={event=>{event.preventDefault();register()}}><input aria-label="Python 폴더 경로" placeholder="Python 폴더 경로" value={folder} onChange={event=>setFolder(event.target.value)}/><button disabled={!folder.trim()||busy}>등록</button></form>
+          <select aria-label="스냅샷 선택" value={revision} onChange={event=>switchProject(event.target.value)}>
+            {!revision && <option value="">스냅샷 선택</option>}
+            {projects.map(item=><option key={item.id} value={item.id}>{item.root.split(/[\\/]/).at(-1)} · {item.id.slice(0,8)}</option>)}
+          </select>
+          {snapshot?.profiles.length ? <select aria-label="분석 프로필" value={snapshot.profile} onChange={event=>setProfile(event.target.value)}>
+            {snapshot.profiles.map(value=><option key={value} value={value}>{profileLabel(value)}</option>)}
+          </select> : null}
+          <input aria-label="단위 검색" placeholder="파일 또는 단위 검색" value={filter} onChange={event=>setFilter(event.target.value)}/>
+        </div>
+        <div className="unit-list">
+          {[...files].map(([file,group])=><section key={file} className="file-group" aria-label={file}>
+            <h2>{file}</h2>{group.map(item=>
+            <button key={item.id} className={selected===item.id?'unit active':'unit'} onClick={()=>navigate(item.id)}>
+              <span className={snapshot?.results[item.id]?.status==='submitted'?'dot done':'dot'}/>
+              <span><strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}</small></span>
+            </button>)}</section>)}
+        </div>
+        <div className="tree-footer">제출 {Object.values(snapshot?.results || {}).filter(value=>value.status==='submitted').length}/{units.length}
+          {' · '}파싱 오류 {Object.keys(snapshot?.issues || {}).length}</div>
+      </aside>
+      <SourcePanel unit={unit} source={unit ? snapshot?.files[unit.file] || '' : ''} lines={highlight}/>
+      <section className="review panel">
+        <div className="panel-title"><strong>검수</strong>{revision && <a href={`/api/export?revision=${revision}`} download="review-coding.json">JSON 내보내기</a>}</div>
+        <nav className="tabs" aria-label="검수 보기">
+          {([['findings','설명·연결'],['events','실행 기록'],['feedback','피드백']] as const).map(([id,label])=>
+            <button key={id} aria-pressed={id===tab} onClick={()=>setTab(id)}>{label}</button>)}
+        </nav>
+        <div className="review-body">
+          {tab==='findings' && (unit && snapshot ? <Findings unit={unit} result={result} snapshot={snapshot} navigate={navigate} highlight={setHighlight}/>
+            : <p className="empty">Python 폴더를 등록해 검수를 시작하세요.</p>)}
+          {tab==='events' && (trace.length ? trace.slice().reverse().map(item=><details key={item.id} className="event">
+            <summary>{item.event.tool || item.event.state} <span>{item.time}</span></summary>
+            <pre>{JSON.stringify(item.event,null,2)}</pre></details>) : <p className="empty">실행 기록이 없습니다.</p>)}
+          {tab==='feedback' && <>
+            <form className="feedback" onSubmit={event=>{event.preventDefault();action(async()=>{
+              await request('/api/feedback',{revision,profile:snapshot?.profile,unit:selected,category,note})
+              setNote('');setRefresh(value=>value+1)
+            })}}>
+              <label>피드백 유형<select value={category} onChange={event=>setCategory(event.target.value)}>{categoryOptions.map(value=><option key={value}>{value}</option>)}</select></label>
+              <label>원본과 비교한 검수 메모<textarea value={note} maxLength={4000} onChange={event=>setNote(event.target.value)}/></label>
+              <button className="primary" disabled={busy || !result || !note.trim()}>저장</button>
+            </form>
+            {snapshot?.feedback.filter(item=>item.unit===selected).map((item,i)=><article className="edge" key={i}><strong>{item.category}</strong><p>{item.note}</p><small>{item.time}</small></article>)}
+          </>}
+        </div>
+      </section>
+    </div>
+  </main>
+}
+
+createRoot(document.getElementById('root')!).render(<App/>)
