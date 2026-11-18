@@ -143,6 +143,22 @@ class LocalTests(unittest.TestCase):
                         view = client.get("/api/snapshot",params={"revision":revision}).json()
                         self.assertEqual(view["results"][uid]["meaning"]["role"], "Pass")
                         self.assertEqual(view["feedback"][0]["note"], "v1 note")
+                        graph = client.get("/api/snapshot", params={"revision":revision, "view":"graph"}).json()
+                        self.assertEqual(graph["files"], {})
+                        self.assertNotIn("meaning", graph["results"][uid])
+                        self.assertEqual(graph["results"][uid]["status"], "submitted")
+                        detail = client.get("/api/snapshot", params={
+                            "revision":revision, "view":"unit", "unit":uid, "profile":legacy}).json()
+                        self.assertEqual(detail["files"], {"a.py":(src / "a.py").read_bytes().decode()})
+                        self.assertEqual(detail["results"][uid]["meaning"]["role"], "Pass")
+                        empty_profile = client.get("/api/snapshot", params={
+                            "revision":revision, "view":"unit", "unit":uid, "profile":""}).json()
+                        self.assertEqual(empty_profile["profile"], "")
+                        self.assertEqual(empty_profile["results"], {})
+                        self.assertEqual(client.get("/api/export", params={"revision":revision}).json()
+                                         ["results"][0]["unit"], uid)
+                        self.assertEqual(client.post("/api/cancel", json={}, headers={"X-Review-Local":"1"}).json()
+                                         ["state"], "cancellation_requested")
                         self.assertEqual(client.post("/api/cancel",json={}).status_code, 403)
                 finally:
                     server.shutdown()

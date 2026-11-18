@@ -4,32 +4,44 @@ Python 코드의 역할, 실행 효과와 연결을 원본에 대응시켜 검�
 분석 단위, 모델 요청, 도구 실행, 결과 검증과 저장을 제어합니다. React 검수 화면은
 로컬 HTTP API와 SSE로 연결됩니다.
 
-## 설치와 실행
+## Windows 데스크톱 실행
 
-Python 3.12 이상, Node.js 22 이상과 OS 자격 증명 저장소가 필요합니다.
-Windows PowerShell에서는 저장소 루트에서 다음을 실행합니다.
+Python 3.12, Node.js 22 이상, Windows 자격 증명 관리자가 필요합니다. 저장소 루트에서
+PowerShell을 열고 다음 명령을 실행합니다.
 
 ~~~powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:REVIEW_CODING_PYTHON = (Resolve-Path '.venv/Scripts/python.exe').Path
 Set-Location ui
 npm ci
-npm run build
-Set-Location ..
-.\.venv\Scripts\python.exe -B main.py review
+npm run desktop
 ~~~
 
-기본 주소는 http://127.0.0.1:8765 입니다. 포트가 사용 중이면
-review --port 8766으로 실행합니다. 화면의 **Continue with ChatGPT**에서 공식 로그인과
-구독 사용 권한을 승인합니다. Windows 자격 증명 관리자, macOS 키체인 또는 Linux Secret
-Service를 사용할 수 있어야 합니다. 토큰은 Python만 읽으며 OS 저장소 키로 암호화한 로컬
-파일에 보관합니다. ChatGPT 설정의 사용량 화면에서 권한과 사용량을 관리할 수 있습니다.
+메인 창은 원근 투영 3D 관계 그래프입니다. 마우스 드래그로 회전하고 Shift+드래그 또는
+오른쪽 버튼 드래그로 이동하며 휠로 확대합니다. 검색에서 함수를 선택하면 카메라가 해당
+단위로 이동합니다. 노드를 누르면 의미 상세가 독립 창으로 열립니다. 같은 프로젝트·스냅샷·
+프로필·단위는 기존 창을 다시 사용하고, 다른 분석 프로필의 창은 각각 유지합니다.
 
-프로젝트 경로를 등록하고 **분석·재개** 또는 **선택 단위 분석**을 누릅니다. 상세 항목이나
-관계의 근거를 눌러 원본을 강조하고, 관계의 대상을 눌러 다른 단위로 이동합니다. Python
-소스 조각은 구독 권한을 승인한 계정의 공식 OpenAI Responses API로 전송됩니다.
-Luna와 medium이 기본값입니다. Luna 접근 권한이 없으면 해당 상태를 표시합니다.
-모델 변경은 모델 선택창에서 직접 선택합니다.
+**분석·검수 관리** 창에서 OAuth 로그인, 계정·모델 선택, 분석·중단, Trace, 내보내기,
+피드백 및 품질 검증을 사용합니다. OAuth 승인은 시스템 브라우저에서 진행합니다. 모델의 기본값은
+Luna와 medium입니다. Python은 실제 소스 조각을 구독을 승인한 계정의 공식 Responses API에
+전송합니다.
+
+Electron이 전용 루프백 포트에서 Python 서비스를 시작합니다. 메인 창을 닫으면 이 앱의
+독립 창과 자체 구동한 Python 서비스가 함께 종료됩니다. 기존 데이터 경로가 기본값이며
+필요하면 REVIEW_CODING_DATA 환경 변수로 별도 데이터 폴더를 지정합니다. 브라우저에서도
+main.py review로 같은 UI와 관리 화면에 접근할 수 있습니다.
+
+## Windows 배포용 폴더 빌드
+
+ui 폴더에서 npm run package:win을 실행합니다. 출력은 ui/release 아래 Electron 실행
+폴더에 저장됩니다. Python과 requirements.txt 의존성은 실행할 PC에서 설치한 뒤
+REVIEW_CODING_PYTHON을 지정합니다. 패키지에는 Python 실행 환경과 개인 분석·인증 데이터가
+포함되지 않습니다.
+
+Windows GUI 회귀 검증은 기존 check_cases 분석이 있는 REVIEW_CODING_DATA를 지정하고
+ui 폴더에서 npm run test:desktop을 실행합니다.
 
 ## CLI
 

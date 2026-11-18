@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Sec-Fetch-Site") == "cross-site" and uri.path.startswith("/api/"):
             self.json({"error": "Cross-site requests are not allowed."}, 403)
             return
-        query = {k: values[0] for k, values in parse_qs(uri.query).items()}
+        query = {k: values[0] for k, values in parse_qs(uri.query, keep_blank_values=True).items()}
         try:
             if post:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -202,10 +202,30 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT unit,state,metadata FROM analysis_task WHERE snapshot=? AND profile=?", (revision, profile))}
             feedback = [dict(unit=uid, time=stamp, **json.loads(raw)) for uid, stamp, raw in db.execute(
                 "SELECT unit,time,data FROM feedback WHERE snapshot=? AND profile=?", (revision, profile))]
-        self.json(dict(root=root, profiles=profiles, profile=profile, units=snap["units"],
+        units, files = snap["units"], snap["files"]
+        view = query.get("view")
+        if view and "profile" in query and profile and profile not in profiles:
+            raise ValueError("Unknown analysis profile.")
+        if view == "graph":
+            files, feedback = {}, []
+            results = {uid: {**conn, "status": results.get(uid, {}).get("status", "")}
+                       for uid, conn in connections.items()} | {
+                uid: dict(status=result["status"], relations=result["relations"])
+                for uid, result in results.items()
+            }
+            connections = {}
+            units = {uid: {**unit, "sites": []} for uid, unit in units.items()}
+        elif view == "unit":
+            uid = query["unit"]
+            unit = units[uid]
+            units, files = {uid: unit}, {unit["file"]: files[unit["file"]]}
+            results = {uid: results[uid]} if uid in results else {}
+            connections, dependencies, feedback = {}, {}, []
+            tasks = {uid: tasks[uid]} if uid in tasks else {}
+        self.json(dict(root=root, profiles=profiles, profile=profile, units=units,
                        results=results, tasks=tasks, connections=connections, dependencies=dependencies,
                        feedback=feedback, issues=snap["issues"],
-                       files={name: file["source"] for name, file in snap["files"].items()}))
+                       files={name: file["source"] for name, file in files.items()}))
 
     def events(self, revision, after):
         self.send_response(200)
