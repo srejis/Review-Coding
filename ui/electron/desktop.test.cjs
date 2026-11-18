@@ -16,6 +16,7 @@ test('Windows Electron uses real snapshots and manages independent detail window
   let origin
   try {
     const main = await desktop.firstWindow()
+    await main.emulateMedia({reducedMotion:'reduce'})
     await main.getByRole('heading', { name: 'Review-Coding' }).waitFor()
     origin = new URL(main.url()).origin
     const projects = await fetch(origin + '/api/projects').then(response => response.json())
@@ -336,5 +337,184 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
     assert.equal(Object.keys((await cached()).positions).length,2)
   } finally {
     await desktop.close().catch(()=>{})
+  }
+})
+
+test('Windows Electron applies all three themes to existing windows and restores preferences', {
+  skip: process.env.REVIEW_CODING_TEST_THEME !== 'isolated' && 'Requires a disposable copied data directory.',
+  timeout: 120000
+}, async () => {
+  const {readFile,writeFile,unlink}=require('node:fs/promises')
+  const file=path.join(data,'desktop-settings.json')
+  const start=()=>_electron.launch({args:[path.resolve(__dirname,'..')],timeout:25000})
+  const appearance=(page,theme)=>page.waitForFunction(value=>document.documentElement.dataset.theme===value,theme)
+  const shot=(page,name)=>screenshot && page.screenshot({path:path.join(screenshot,name+'.png')})
+  await unlink(file).catch(error=>{if (error.code!=='ENOENT') throw error})
+  let desktop=await start()
+  try {
+    await appearance(await desktop.firstWindow(),'editorial')
+    await desktop.close()
+    const legacy={model:'gpt-6-luna',effort:'high',compactExplorer:true}
+    await writeFile(file,JSON.stringify(legacy))
+    desktop=await start()
+    const main=await desktop.firstWindow()
+    const origin=new URL(main.url()).origin
+    const project=(await fetch(origin+'/api/projects').then(r=>r.json()))
+      .find(project=>path.basename(project.root)==='check_cases')
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(project.id)
+    const select=main.getByRole('combobox',{name:'분석 프로필'})
+    await select.waitFor()
+    const profiles=await select.locator('option').evaluateAll(items=>items.map(item=>item.value))
+    let snapshot
+    for (const profile of profiles) {
+      const query=new URLSearchParams({revision:project.id,profile,view:'graph'})
+      const candidate=await fetch(origin+'/api/snapshot?'+query).then(r=>r.json())
+      if (['normalize','append_scores'].every(name=>candidate.graph.nodes.some(unit=>unit.name===name)) &&
+          candidate.graph.edges.length) {snapshot=candidate;break}
+    }
+    assert.ok(snapshot)
+    await select.selectOption(snapshot.profile)
+    await main.locator('.map-footer').getByText(/완료 [1-9]/).waitFor()
+    assert.deepEqual(await main.evaluate(()=>window.reviewDesktop.preferences()),{...legacy,theme:'editorial'})
+    assert.deepEqual(JSON.parse(await readFile(file,'utf8')),legacy)
+    const open=async (action)=>{
+      const pending=desktop.waitForEvent('window')
+      await action()
+      return pending
+    }
+    const detail=name=>open(()=>main.evaluate(identity=>window.reviewDesktop.openDetail(identity),{
+      root:snapshot.root,revision:project.id,profile:snapshot.profile,
+      unit:snapshot.graph.nodes.find(unit=>unit.name===name).id
+    }))
+    const a=await detail('normalize'), b=await detail('append_scores')
+    for (const page of [a,b]) await page.getByRole('button',{name:/원본 L/}).first().click()
+    const picked=await a.locator('.evidence-line').allTextContents()
+    const original=await a.locator('.detail-source code').allTextContents()
+    const unit=Object.values(snapshot.units).find(unit=>unit.name==='normalize')
+    const unitQuery=new URLSearchParams({revision:project.id,profile:snapshot.profile,view:'unit',unit:unit.id})
+    const unitData=await fetch(origin+'/api/snapshot?'+unitQuery).then(r=>r.json())
+    assert.deepEqual(original, unitData.files[unit.file].split(/\r?\n/).map(line=>line || ' '))
+    const progress=await open(()=>main.evaluate(revision=>window.reviewDesktop.openProgress(revision),project.id))
+    const management=await open(()=>main.evaluate(()=>window.reviewDesktop.openManagement()))
+    let analyzeRequests=0
+    for (const page of [main,a,b,progress,management]) page.on('request',request=>{
+      if (/\/api\/(analyze|cancel)$/.test(request.url()) && request.method()==='POST') analyzeRequests++
+    })
+    await progress.route('**/api/run',route=>route.fulfill({json:{revision:project.id,state:'running',
+      model:legacy.model,effort:legacy.effort,submitted:1,left:3,current_unit:'normalize',phase:'SEMANTICIZING'}}))
+    await progress.getByRole('status').filter({hasText:'분석 중'}).waitFor()
+    const settings=await open(()=>main.evaluate(()=>window.reviewDesktop.openSettings()))
+    await settings.getByRole('button',{name:'테마',exact:true}).click()
+    await settings.getByRole('radio',{name:/Editorial/}).isChecked().then(checked=>assert.ok(checked))
+    await shot(settings,'theme-settings')
+    await settings.getByRole('radio',{name:/Spatial/}).check()
+    await appearance(main,'editorial')
+    await settings.close()
+    assert.equal(JSON.parse(await readFile(file,'utf8')).theme,undefined)
+    const picker=await open(()=>main.evaluate(()=>window.reviewDesktop.openSettings()))
+    await picker.getByRole('button',{name:'테마',exact:true}).click()
+    await picker.getByRole('radio',{name:/Editorial/}).isChecked().then(checked=>assert.ok(checked))
+    const canvas=main.locator('canvas')
+    const search=main.getByRole('textbox',{name:'함수·클래스·파일 검색'})
+    await search.fill('normalize')
+    await search.press('Enter')
+    await main.locator('.map-footer').getByText(/선택 1개/).waitFor()
+    const bounds=await canvas.boundingBox()
+    await main.mouse.move(bounds.x+15,bounds.y+15)
+    await main.mouse.wheel(0,-220)
+    await main.waitForFunction(()=>document.querySelector('canvas').getContext('2d')
+      .getImageData(0,0,document.querySelector('canvas').width,document.querySelector('canvas').height)
+      .data.some((value,i)=>i%4===3&&value))
+    await main.waitForTimeout(330)
+    const pixels=()=>canvas.evaluate(el=>el.toDataURL())
+    const initial=await pixels()
+    const stableWindowCount=desktop.windows().length
+    const {createHash}=require('node:crypto')
+    const key=JSON.stringify([snapshot.root,project.id,snapshot.profile,'incremental-v1'])
+    const layoutFile=path.join(data,'graph-layouts',createHash('sha256').update(key).digest('hex')+'.json')
+    const layout=await readFile(layoutFile,'utf8')
+    const surfaces=new Set(), images=new Set()
+    const options=[['Editorial','editorial'],['Precision','engineering'],['Spatial','spatial'],['Editorial','editorial']]
+    for (const [name,theme] of options) {
+      await picker.getByRole('radio',{name:new RegExp(name)}).check()
+      await picker.getByRole('button',{name:'설정 저장'}).click()
+      await picker.getByText('저장했습니다.').waitFor()
+      for (const page of [main,a,b,progress,management,picker]) await appearance(page,theme)
+      await main.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+      const control=await main.locator('.map-header select').evaluate(element=>{
+        const style=getComputedStyle(element)
+        return {
+          color:style.color,
+          ink:style.getPropertyValue('--ink').trim()
+        }
+      })
+      const rgb=[...control.ink.matchAll(/[0-9a-f]{2}/gi)].map(pair=>parseInt(pair[0],16))
+      assert.equal(control.color,'rgb('+rgb.join(', ')+')')
+      surfaces.add(await a.locator('.detail-shell').evaluate(el=>getComputedStyle(el).backgroundColor))
+      images.add(await pixels())
+      assert.deepEqual(await a.locator('.evidence-line').allTextContents(),picked)
+      assert.equal(await select.inputValue(),snapshot.profile)
+      assert.equal(await readFile(layoutFile,'utf8'),layout)
+      assert.equal(desktop.windows().length,stableWindowCount)
+      await main.locator('.map-footer').getByText(/선택 1개/).waitFor()
+      await progress.getByRole('status').filter({hasText:'분석 중'}).waitFor()
+      await shot(main,theme+'-graph')
+      if (screenshot) {
+        await a.locator('.detail-header').scrollIntoViewIfNeeded()
+        await shot(a,theme+'-detail')
+        await a.locator('.evidence-line').first().scrollIntoViewIfNeeded()
+        await shot(a,theme+'-evidence')
+      }
+    }
+    assert.equal(await pixels(),initial,'Same theme restores the exact camera and canvas')
+    assert.equal(surfaces.size,3)
+    assert.equal(images.size,3)
+    assert.equal(analyzeRequests,0)
+    await main.emulateMedia({reducedMotion:'reduce'})
+    await main.getByRole('button',{name:'시점 초기화'}).click()
+    await main.waitForFunction(()=>matchMedia('(prefers-reduced-motion: reduce)').matches)
+    assert.equal(await main.locator('.map-primary').evaluate(el=>getComputedStyle(el).transitionDuration),'0s')
+    await picker.getByRole('radio',{name:/Spatial/}).check()
+    await picker.getByRole('button',{name:'설정 저장'}).click()
+    await appearance(main,'spatial')
+    assert.deepEqual(JSON.parse(await readFile(file,'utf8')),{...legacy,theme:'spatial'})
+    await desktop.close()
+    desktop=await start()
+    await appearance(await desktop.firstWindow(),'spatial')
+  } finally {
+    await desktop.close().catch(()=>{})
+  }
+})
+
+
+test('Browser tabs synchronize saved themes through local storage', {
+  skip: !process.env.REVIEW_CODING_TEST_BROWSER && 'Set REVIEW_CODING_TEST_BROWSER to an installed Chromium executable.',
+  timeout: 60000
+}, async () => {
+  const {chromium}=require('playwright-core')
+  const desktop=await _electron.launch({args:[path.resolve(__dirname,'..')],timeout:25000})
+  let browser
+  try {
+    const main=await desktop.firstWindow()
+    const origin=new URL(main.url()).origin
+    browser=await chromium.launch({executablePath:process.env.REVIEW_CODING_TEST_BROWSER})
+    const context=await browser.newContext()
+    const graph=await context.newPage(), settings=await context.newPage()
+    const theme=(page,value)=>page.waitForFunction(expected=>document.documentElement.dataset.theme===expected,value)
+    await graph.goto(origin)
+    assert.equal(await graph.evaluate(()=>Boolean(window.reviewDesktop)),false)
+    await theme(graph,'editorial')
+    await settings.goto(origin+'/?mode=settings')
+    await settings.getByRole('button',{name:'테마',exact:true}).click()
+    await settings.getByRole('radio',{name:/Precision/}).check()
+    await theme(graph,'editorial')
+    await settings.getByRole('button',{name:'설정 저장'}).click()
+    await theme(settings,'engineering')
+    await theme(graph,'engineering')
+    await graph.reload()
+    await theme(graph,'engineering')
+  } finally {
+    if (browser) await browser.close()
+    await desktop.close()
   }
 })

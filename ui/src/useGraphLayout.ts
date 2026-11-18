@@ -1,4 +1,5 @@
 import {useEffect, useRef} from 'react'
+import {currentTheme,motionPreference} from './theme'
 import {emptyLayout, uniquePairs, validPoint} from './incrementalLayout'
 import type {LayoutCache} from './incrementalLayout'
 import type {LayoutScope} from './desktop'
@@ -41,10 +42,11 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
     let prior=emptyLayout(), generation=0, frame=0
     let wanted:Topology|undefined
     let received:LayoutCache|undefined
-    let interpolation:{from:Record<string,Point>; to:Record<string,Point>; step:number}|undefined
+    let interpolation:{from:Record<string,Point>; to:Record<string,Point>; elapsed:number; last:number; duration:number}|undefined
     let writes=Promise.resolve()
+    const motion=motionPreference()
 
-    function animate() {
+    function animate(now:number) {
       frame=0
       if (paused || !active) return
       if (received) {
@@ -59,12 +61,15 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
           callbacks.current.update()
           return
         }
-        interpolation={from,to,step:0}
+        interpolation={from,to,elapsed:0,last:now,duration:currentTheme().move}
       }
       if (!interpolation) return
       const {from,to}=interpolation
-      const completed=++interpolation.step>=26
-      const factor=1-(1-interpolation.step/26)**3
+      interpolation.elapsed+=now-interpolation.last
+      interpolation.last=now
+      const progress=motion.matches?1:Math.min(1,interpolation.elapsed/interpolation.duration)
+      const completed=progress===1
+      const factor=1-(1-progress)**3
       coordinates.current=completed ? to : Object.fromEntries(Object.entries(to).map(([id,target])=>{
         const previous=from[id] || target
         return [id,{
@@ -101,7 +106,11 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
       submit()
     }
     pause.current=()=>{paused=true}
-    resume.current=()=>{paused=false;schedule()}
+    resume.current=()=>{
+      paused=false
+      if (interpolation) interpolation.last=performance.now()
+      schedule()
+    }
     worker.onmessage=({data}:MessageEvent<LayoutCache & {generation:number}>)=>{
       if (!active) return
       running=false

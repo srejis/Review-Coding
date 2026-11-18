@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react'
+import {useMemo,useEffect, useRef, useState} from 'react'
 import {request} from './api'
 import type {Run, Snapshot} from './api'
 import {detailQuery, openProgress, profileLabel, startAnalysis} from './desktop'
@@ -63,7 +63,7 @@ export default function Detail() {
   const task=snapshot?.tasks[identity.unit]
   const stale=result?.status==='stale' || task?.stale
   const source=unit ? snapshot?.files[unit.file] : undefined
-  const sourceLines=source?.split(/\r?\n/) || []
+  const sourceLines=useMemo(()=>highlightPython(source || ''),[source])
   const sites=new Map(unit?.sites.map(site=>[site.id,site]) || [])
 
   async function openManagement() {
@@ -129,11 +129,34 @@ export default function Detail() {
           onClick={()=>{setLines([unit.line]);setSourceOpen(value=>!value)}}>{sourceOpen?'원본 접기':'원본 펼치기'}</button>
         {sourceOpen && <div className="detail-source">{sourceLines.map((line,i)=>(
           <div key={i} ref={i+1===lines[0]?marked:undefined} className={lines.includes(i+1)?'evidence-line':''}>
-            <span>{i+1}</span><code>{line || ' '}</code>
+            <span>{i+1}</span><code>{line.length ? line.map((token,index)=>token.kind ?
+              <span key={index} className={token.kind}>{token.text}</span> : token.text) : ' '}</code>
           </div>
         ))}</div>}
       </section>}
       <footer className="detail-footer"><button onClick={()=>openManagement()}>분석·피드백 및 검수 기록</button></footer>
     </>}
   </main>
+}
+
+
+type SourceToken={text:string; kind?:'syntax'|'comment'}
+
+function highlightPython(source:string) {
+  const tokens=/#[^\r\n]*|"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|global|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b/g
+  const lines:SourceToken[][]=[[]]
+  function append(text:string,kind?:SourceToken['kind']) {
+    text.split(/\r?\n/).forEach((part,index)=>{
+      if (index) lines.push([])
+      if (part) lines[lines.length-1].push({text:part,kind})
+    })
+  }
+  let cursor=0
+  for (const match of source.matchAll(tokens)) {
+    append(source.slice(cursor,match.index))
+    append(match[0],match[0].startsWith('#')?'comment':'syntax')
+    cursor=match.index+match[0].length
+  }
+  append(source.slice(cursor))
+  return lines
 }

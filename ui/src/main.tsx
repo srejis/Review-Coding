@@ -9,6 +9,9 @@ import {openProgress, openSettings, profileLabel, startAnalysis, usePreferences}
 import type {NodeIdentity} from './desktop'
 import './style.css'
 import './desktop.css'
+import './themes.css'
+import {browserPreferences,watchPreferences} from './desktop'
+import {isTheme} from './theme'
 
 const Detail=lazy(()=>import('./Detail'))
 const Management=lazy(()=>import('./Management'))
@@ -197,7 +200,7 @@ function GraphApp() {
 
   return <main className="map-shell">
     <header className="map-header">
-      <div className="map-title"><span className="app-mark" aria-hidden="true">◉</span><h1>Review-Coding</h1></div>
+      <div className="map-title"><span className="app-mark" aria-hidden="true">RC</span><h1>Review-Coding</h1></div>
       <div className="map-controls">
         <select aria-label="프로젝트·스냅샷" value={revision} onChange={e=>selectRevision(e.target.value)}>
           <option value="" disabled>프로젝트 선택</option>
@@ -275,4 +278,7 @@ function Root() {
   </Suspense>
 }
 
+const appearance=window.reviewDesktop ? mode.get('appearance') : browserPreferences().theme
+document.documentElement.dataset.theme=isTheme(appearance)?appearance:'editorial'
+watchPreferences(value=>{document.documentElement.dataset.theme=value.theme},console.error)
 createRoot(document.getElementById('root')!).render(<Root/>)

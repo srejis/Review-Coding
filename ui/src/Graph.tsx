@@ -2,11 +2,13 @@ import {useEffect, useMemo, useRef} from 'react'
 import type {GraphView} from './api'
 import type {LayoutScope} from './desktop'
 import {useGraphLayout} from './useGraphLayout'
+import {currentTheme,motionPreference} from './theme'
 import type {Point} from './treeLayout'
 
-type Node = {id:string; name:string; color:string}
-type Projected = Node & {sx:number; sy:number; radius:number; depth:number}
+type Node = {id:string; name:string; quality:boolean}
+type Projected = Node & {sx:number; sy:number; radius:number; depth:number; alpha:number}
 const initialCamera=()=>({pitch:.12,yaw:-.35,distance:950,zoom:1,panX:0,panY:0,target:{x:0,y:0,z:0}})
+type Camera=ReturnType<typeof initialCamera>
 const clamp=(value:number,min:number,max:number)=>Math.min(max,Math.max(min,value))
 
 function fit(points:Point[]) {
@@ -30,14 +32,16 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
   const projected=useRef<Projected[]>([])
   const draw=useRef(()=>{})
   const camera=useRef(initialCamera())
+  const flight=useRef<{from:Camera; to:Camera; start:number; duration:number}|undefined>(undefined)
   const interaction=useRef<{x:number;y:number;startX:number;startY:number;pan:boolean}|null>(null)
   const cameraTouched=useRef(false)
   const nodes=useMemo(()=>graph?.nodes.map(node=>({
-    id:node.id,name:node.name,color:node.quality?'#a3f1d3':'#42d6a0'
+    id:node.id,name:node.name,quality:node.quality
   })) || [],[graph])
   const edges=useMemo(()=>graph?.edges.map(edge=>({
     from:edge.source,to:edge.target,dependency:edge.dependency,
-    certain:edge.certainty==='confirmed',kind:edge.kind
+    certain:edge.certainty==='confirmed',kind:edge.kind,
+    key:JSON.stringify([edge.source,edge.target,edge.kind,edge.certainty,edge.dependency])
   })) || [],[graph])
   const layout=useGraphLayout(scope,graph,()=>draw.current(),positions=>{
     const view=fit(Object.values(positions))
@@ -55,13 +59,28 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     release.current=window.setTimeout(()=>{if (!interaction.current) layout.resume.current()},180)
   }
 
+  function flyTo(next:Camera) {
+    if (motionPreference().matches) {flight.current=undefined;camera.current=next}
+    else flight.current={from:camera.current,to:next,start:performance.now(),duration:currentTheme().camera}
+    draw.current()
+  }
+
   useEffect(()=>{
     const el=canvas.current
     if (!el) return
     const ctx=el.getContext('2d')
     if (!ctx) return
     let frame=0
-    const paint=()=>{
+    const motion=motionPreference()
+    let material=readMaterial(el)
+    type Reveal={start:number; duration:number}
+    const starts=new Map<string,Reveal>(), edgeStarts=new Map<string,Reveal>()
+    let previousNodes:typeof nodes|undefined, previousEdges:typeof edges|undefined
+    const appearance=new MutationObserver(()=>{material=readMaterial(el);draw.current()})
+    appearance.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']})
+    const drawForMotion=()=>draw.current()
+    motion.addEventListener('change',drawForMotion)
+    const paint=(now:number)=>{
       frame=0
       const {width,height}=el.getBoundingClientRect()
       if (!width || !height) return
@@ -72,9 +91,42 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       }
       ctx.setTransform(dpr,0,0,dpr,0,0)
       ctx.clearRect(0,0,width,height)
+      let animating=false
+      const journey=flight.current
+      if (journey) {
+        const progress=motion.matches?1:clamp((now-journey.start)/journey.duration,0,1)
+        const t=1-(1-progress)**3
+        const {from,to}=journey
+        const mix=(a:number,b:number)=>a+(b-a)*t
+        camera.current={
+          pitch:mix(from.pitch,to.pitch),yaw:mix(from.yaw,to.yaw),zoom:mix(from.zoom,to.zoom),
+          distance:mix(from.distance,to.distance),panX:mix(from.panX,to.panX),panY:mix(from.panY,to.panY),
+          target:{x:mix(from.target.x,to.target.x),y:mix(from.target.y,to.target.y),z:mix(from.target.z,to.target.z)}
+        }
+        if (progress===1) flight.current=undefined
+        else animating=true
+      }
       const {yaw,pitch,zoom,panX,panY,target,distance}=camera.current
       const {nodes,edges,selected}=latest.current
       const sinY=Math.sin(yaw),cosY=Math.cos(yaw),sinX=Math.sin(pitch),cosX=Math.cos(pitch)
+      function prune(known:Map<string,Reveal>,ids:string[]) {
+        const current=new Set(ids)
+        for (const id of known.keys()) if (!current.has(id)) known.delete(id)
+      }
+      if (previousNodes!==nodes) {prune(starts,nodes.map(node=>node.id));previousNodes=nodes}
+      if (previousEdges!==edges) {prune(edgeStarts,edges.map(edge=>edge.key));previousEdges=edges}
+      function reveal(known:Map<string,Reveal>,id:string) {
+        let entry=known.get(id)
+        if (!entry) {
+          entry={start:now,duration:material.theme.enter}
+          known.set(id,entry)
+        }
+        if (motion.matches) entry.duration=0
+        if (interaction.current || !entry.duration) return 1
+        const progress=clamp((now-entry.start)/entry.duration,0,1)
+        if (progress<1) animating=true
+        return 1-(1-progress)**2
+      }
       const scale=Math.min(width,height)/710
       const points=nodes.flatMap(node=>{
         const point=layout.coordinates.current[node.id]
@@ -84,8 +136,9 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
         const ry=y*cosX-rz*sinX, depth=distance+y*sinX+rz*cosX
         const perspective=950*scale*zoom/depth
         if (depth<50) return []
-        return [{...node,depth,sx:width/2+rx*perspective+panX,sy:height/2-ry*perspective+panY,
-          radius:clamp((nodes.length>250?6:10)*perspective,3,16)}]
+        const alpha=reveal(starts,node.id)
+        return [{...node,depth,alpha,sx:width/2+rx*perspective+panX,sy:height/2-ry*perspective+panY,
+          radius:clamp((nodes.length>250?6:10)*perspective,3,16)*(.75+.25*alpha)}]
       }).sort((a,b)=>b.depth-a.depth)
       projected.current=points
       const position=new Map(points.map(node=>[node.id,node]))
@@ -96,7 +149,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
         const color=edge.dependency?'#bc9ef0':edge.kind==='call'?'#74c7bf':'#829ca6'
         const dx=b.sx-a.sx,dy=b.sy-a.sy,len=Math.hypot(dx,dy)
         const shorten=b.radius+4
-        ctx.globalAlpha=important?.9:.34
+        ctx.globalAlpha=(important?.9:.34)*reveal(edgeStarts,edge.key)
         ctx.strokeStyle=color
         ctx.lineWidth=edge.dependency?2:1.3
         ctx.setLineDash(edge.dependency?[3,4]:edge.certain?[]:[7,5])
@@ -121,8 +174,10 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       const labels=nodes.length<45 || (nodes.length<160 && zoom>1.65)
       for (const node of points) {
         const active=selected.has(node.id)
-        paintNode(ctx,node,labels || (active && selected.size<=18),active)
+        paintNode(ctx,node,labels || (active && selected.size<=18),active,material)
       }
+      ctx.globalAlpha=1
+      if (animating) draw.current()
     }
     draw.current=()=>{if (!frame) frame=requestAnimationFrame(paint)}
     const observer=new ResizeObserver(draw.current)
@@ -131,6 +186,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     const zoom=(event:WheelEvent)=>{
       event.preventDefault()
       cameraTouched.current=true
+      flight.current=undefined
       layout.pause.current()
       window.clearTimeout(wheel)
       wheel=window.setTimeout(()=>{if (!interaction.current) layout.resume.current()},130)
@@ -141,6 +197,8 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     draw.current()
     return ()=>{
       observer.disconnect()
+      appearance.disconnect()
+      motion.removeEventListener('change',drawForMotion)
       el.removeEventListener('wheel',zoom)
       window.clearTimeout(wheel)
       window.clearTimeout(release.current)
@@ -153,10 +211,8 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     if (priorReset.current===reset) return
     priorReset.current=reset
     cameraTouched.current=true
-    camera.current=initialCamera()
     const points=latest.current.nodes.flatMap(node=>layout.coordinates.current[node.id] || [])
-    Object.assign(camera.current,fit(points))
-    draw.current()
+    flyTo({...initialCamera(),...fit(points)})
   },[reset])
   useEffect(()=>{
     if (priorFocus.current===focus) return
@@ -166,9 +222,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       latest.current.selected.has(node.id) ? (layout.coordinates.current[node.id] || []) : [])
     const view=fit(points)
     if (!view) return
-    cameraTouched.current=true
-    Object.assign(camera.current,view)
-    draw.current()
+    flyTo({...camera.current,...view})
   },[focus])
 
   return <canvas ref={canvas} className="graph-canvas" aria-label="Interactive 3D code graph" tabIndex={0}
@@ -182,6 +236,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       if (event.button!==0 && event.button!==1 && event.button!==2) return
       cameraTouched.current=true
       window.clearTimeout(release.current)
+      flight.current=undefined
       layout.pause.current()
       event.currentTarget.setPointerCapture(event.pointerId)
       interaction.current={x:event.clientX,y:event.clientY,startX:event.clientX,startY:event.clientY,
@@ -216,7 +271,9 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       const points=projected.current
       for (let i=points.length-1;i>=0;i--) {
         const node=points[i]
-        if (Math.hypot(node.sx-x,node.sy-y)<=node.radius+4 &&
+        const dx=node.sx-x,dy=node.sy-y
+        const distance=currentTheme().shape==='precision' ? Math.max(Math.abs(dx),Math.abs(dy)) : Math.hypot(dx,dy)
+        if (node.alpha>0 && distance<=node.radius+4 &&
             latest.current.nodes.some(candidate=>candidate.id===node.id)) {
           lastClick.current=node.id
           latest.current.choose(node.id,event.ctrlKey || event.metaKey)
@@ -234,28 +291,50 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     }} />
 }
 
-function paintNode(ctx:CanvasRenderingContext2D,node:Projected,label:boolean,selected:boolean) {
-  ctx.beginPath()
-  ctx.arc(node.sx,node.sy,node.radius,0,Math.PI*2)
-  ctx.fillStyle=node.color
+function readMaterial(element:HTMLElement) {
+  const css=getComputedStyle(element)
+  const token=(name:string)=>css.getPropertyValue('--'+name).trim()
+  return {theme:currentTheme(),node:token('node'),quality:token('node-quality'),
+    stroke:token('node-stroke'),ring:token('ring'),text:token('stage-bright'),
+    font:token('sans'),mono:token('mono')}
+}
+
+function paintNode(ctx:CanvasRenderingContext2D,node:Projected,label:boolean,selected:boolean,material:ReturnType<typeof readMaterial>) {
+  const {sx,sy,radius}=node
+  const square=material.theme.shape==='precision'
+  const halo=material.theme.shape==='halo'
+  const path=(size:number)=>{
+    ctx.beginPath()
+    if (square) ctx.roundRect(sx-size,sy-size,size*2,size*2,2)
+    else ctx.arc(sx,sy,size,0,Math.PI*2)
+  }
+  ctx.globalAlpha=node.alpha
+  path(radius)
+  ctx.fillStyle=node.quality?material.quality:material.node
+  if (selected && halo) {
+    ctx.shadowColor=material.ring
+    ctx.shadowBlur=13
+  }
   ctx.fill()
-  ctx.lineWidth=selected?2.5:1
-  ctx.strokeStyle=selected?'#fff4ce':'#14242a'
+  ctx.shadowBlur=0
+  ctx.lineWidth=selected?2:1
+  ctx.strokeStyle=selected?material.ring:material.stroke
   ctx.stroke()
   if (selected) {
-    ctx.beginPath()
-    ctx.arc(node.sx,node.sy,node.radius+4,0,Math.PI*2)
+    path(radius+4)
     ctx.lineWidth=1.5
     ctx.stroke()
   }
   if (label) {
-    ctx.font=selected?'600 15px Geist, Segoe UI, sans-serif':'12px Geist, Segoe UI, sans-serif'
+    ctx.font=(selected?'600 15px ':'12px ')+(square?material.mono:material.font)
     ctx.textAlign='center'
-    const y=node.sy-node.radius-(selected?12:6)
-    ctx.strokeStyle='#10191e'
+    const y=sy-radius-(selected?12:6)
+    ctx.strokeStyle=material.stroke
     ctx.lineWidth=4
-    ctx.strokeText(node.name,node.sx,y)
-    ctx.fillStyle=selected?'#fff4ce':'#d9e9ec'
-    ctx.fillText(node.name,node.sx,y)
+    ctx.lineJoin='round'
+    ctx.strokeText(node.name,sx,y)
+    ctx.lineJoin='miter'
+    ctx.fillStyle=selected?material.ring:material.text
+    ctx.fillText(node.name,sx,y)
   }
 }

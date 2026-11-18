@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld('reviewDesktop', {
   openSettings: () => ipcRenderer.invoke('review:settings'),
   openProgress: revision => ipcRenderer.invoke('review:progress', revision),
   preferences: () => ipcRenderer.invoke('review:preferences'),
+  onPreferences: listener => {
+    const handle = (_, value) => listener(value)
+    ipcRenderer.on('review:preferences-changed', handle)
+    return () => ipcRenderer.removeListener('review:preferences-changed', handle)
+  },
   savePreferences: value => ipcRenderer.invoke('review:save-preferences', value),
   loadLayout: scope => ipcRenderer.invoke('review:load-layout', scope),
   saveLayout: (scope, cache) => ipcRenderer.invoke('review:save-layout', scope, cache)

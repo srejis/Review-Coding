@@ -1,0 +1,5 @@
+{
+  "engineering": {"surface":"#181a1d","shape":"precision","enter":150,"move":200,"camera":140},
+  "editorial": {"surface":"#f3efe7","shape":"paper","enter":210,"move":290,"camera":240},
+  "spatial": {"surface":"#101028","shape":"halo","enter":255,"move":345,"camera":320}
+}

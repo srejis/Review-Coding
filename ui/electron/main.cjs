@@ -5,6 +5,9 @@ const { createHash, randomUUID } = require('node:crypto')
 const { mkdir, readFile, rename, writeFile, unlink } = require('node:fs/promises')
 const { createInterface } = require('node:readline')
 
+const themes = require('./themes.json')
+const isTheme = theme => typeof theme === 'string' && Object.hasOwn(themes, theme)
+
 app.setName('Review-Coding')
 const backendRoot = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.resolve(__dirname, '..', '..')
 const secondary = new Map()
@@ -62,7 +65,7 @@ function permittedPage(value) {
 function appWindow(query, sizes, kind) {
   const window = new BrowserWindow({
     ...sizes, minWidth: kind === 'graph' ? 720 : 440, minHeight: 500,
-    backgroundColor: kind === 'graph' ? '#10171a' : '#f1f4f2',
+    backgroundColor: themes[preferences.theme].surface,
     show: false, autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
@@ -77,7 +80,7 @@ function appWindow(query, sizes, kind) {
     if (!permittedPage(url)) event.preventDefault()
   })
   window.once('ready-to-show', () => window.show())
-  window.loadURL(origin + '/?' + new URLSearchParams(query)).catch(() => {
+  window.loadURL(origin + '/?' + new URLSearchParams({ ...query, appearance: preferences.theme })).catch(() => {
     if (!quitting && !window.isDestroyed()) {
       window.destroy()
       if (kind === 'graph' && !quitting) serviceLost()
@@ -149,7 +152,8 @@ ipcMain.handle('review:folder', async event => {
   const selections = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
   return selections.filePaths[0] || null
 })
-const defaults = { model: 'gpt-6-luna', effort: 'medium', compactExplorer: false }
+const defaults = { model: 'gpt-6-luna', effort: 'medium', compactExplorer: false, theme: 'editorial' }
+let preferences = defaults
 const efforts = new Set(['none','minimal','low','medium','high','xhigh','max','ultra'])
 let settingsQueue = Promise.resolve()
 
@@ -162,26 +166,37 @@ function validPreferences(value) {
     && efforts.has(value.effort) && typeof value.compactExplorer === 'boolean'
 }
 
-ipcMain.handle('review:preferences', async event => {
-  trust(event, ['graph','detail','management','settings','progress'])
+async function loadPreferences() {
   try {
     const value = JSON.parse(await readFile(settingsPath(), 'utf8'))
     if (!validPreferences(value)) throw new Error('Invalid desktop settings file.')
-    return value
+    return { ...value, theme: isTheme(value.theme) ? value.theme : defaults.theme }
   } catch (error) {
     if (error.code === 'ENOENT') return defaults
-    throw error
+    console.warn('Could not load desktop settings:', error.message)
+    return defaults
   }
+}
+ipcMain.handle('review:preferences', event => {
+  trust(event, ['graph','detail','management','settings','progress'])
+  return preferences
 })
 ipcMain.handle('review:save-preferences', async (event, value) => {
   trust(event, ['settings'])
-  if (!validPreferences(value)) throw new Error('Invalid desktop settings.')
+  if (!validPreferences(value) || !isTheme(value.theme)) throw new Error('Invalid desktop settings.')
   const operation = settingsQueue.then(async () => {
     const file = settingsPath(), temp = file + '.tmp'
     await mkdir(path.dirname(file), { recursive: true })
-    await writeFile(temp, JSON.stringify({ model:value.model, effort:value.effort,
-      compactExplorer:value.compactExplorer }), 'utf8')
+    const next = { ...preferences, model:value.model, effort:value.effort,
+      compactExplorer:value.compactExplorer, theme:value.theme }
+    await writeFile(temp, JSON.stringify(next), 'utf8')
     await rename(temp, file)
+    preferences = next
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed()) continue
+      window.setBackgroundColor(themes[next.theme].surface)
+      if (permittedPage(window.webContents.getURL())) window.webContents.send('review:preferences-changed', next)
+    }
   })
   settingsQueue = operation.catch(() => {})
   await operation
@@ -264,6 +279,7 @@ app.whenReady().then(async () => {
     contents.on('will-attach-webview', event => event.preventDefault())
   })
   try {
+    preferences = await loadPreferences()
     await startService()
   } catch (error) {
     dialog.showErrorBox('Review-Coding 시작 실패',

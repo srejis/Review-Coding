@@ -3,8 +3,10 @@ import {request, LUNA} from './api'
 import type {Account} from './api'
 import {defaults, readPreferences, savePreferences} from './desktop'
 
+import ThemePicker from './ThemePicker'
+
 export default function Settings() {
-  const [tab,setTab]=useState<'general'|'model'>('general')
+  const [tab,setTab]=useState<'general'|'model'|'theme'>('general')
   const [value,setValue]=useState(defaults)
   const [account,setAccount]=useState<Account>()
   const [accountChoice,setAccountChoice]=useState('')
@@ -52,8 +54,10 @@ export default function Settings() {
     <nav className="tabs" aria-label="설정 분류">
       <button aria-pressed={tab==='general'} onClick={()=>setTab('general')}>일반</button>
       <button aria-pressed={tab==='model'} onClick={()=>setTab('model')}>모델</button>
+      <button aria-pressed={tab==='theme'} onClick={()=>setTab('theme')}>테마</button>
     </nav>
-    {tab==='general' ? <section className="desktop-fields">
+    {tab==='theme' ? <ThemePicker value={value.theme} disabled={!loaded || busy}
+      onChange={theme=>{setValue({...value,theme});setSaved(false)}}/> : tab==='general' ? <section className="desktop-fields">
       <label className="check-field"><input type="checkbox" checked={value.compactExplorer}
         onChange={event=>{setValue({...value,compactExplorer:event.target.checked});setSaved(false)}}/>
         파일 탐색기 줄 간격 줄이기</label>
