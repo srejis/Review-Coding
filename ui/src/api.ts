@@ -8,9 +8,14 @@ export type Task = { state:string; waiting?:string[]; path?:string[]; cycle?:str
 export type Result = { status: string; version?:string; relations: Relation[]; boundaries?:Boundary[];
   dependencies?:{unit:string; version:string}[]; meaning: {
   role: string; steps: { text: string; sites: string[] }[]; missing: string[]; unresolved: string[] } }
+export type GraphNode = {id:string; name:string; version:string; quality:boolean}
+export type GraphEdge = {source:string; target:string; dependency:boolean; kind:string;
+  certainty:string; version:string}
+export type GraphView = {revision:string; nodes:GraphNode[]; edges:GraphEdge[];
+  counts:{total:number; completed:number; partial:number}}
 export type Snapshot = { root: string; profiles: string[]; profile: string; units: Record<string, Unit>;
   files: Record<string, string>; file_paths?:string[]; results: Record<string, Result>; issues: Record<string, string>;
-  tasks: Record<string,Task>; connections: Record<string,{relations:Relation[]}>;
+  graph?:GraphView; tasks: Record<string,Task>; connections: Record<string,{relations:Relation[]}>;
   dependencies: Record<string,string[]>;
   feedback: { unit: string; time: string; category: string; note: string }[] }
 export type Account = { auth: string; problem?: string; active?: string; efforts: string[];

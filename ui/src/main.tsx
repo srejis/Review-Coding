@@ -1,6 +1,7 @@
-import {lazy, Suspense, useEffect, useMemo, useState} from 'react'
+import {lazy, Suspense, useEffect, useMemo, useRef, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import Graph from './Graph'
+import {LAYOUT_VERSION} from './incrementalLayout'
 import Explorer from './Explorer'
 import {request} from './api'
 import type {ActiveRun, Project, Snapshot} from './api'
@@ -28,7 +29,8 @@ function GraphApp() {
   const [selected,setSelected]=useState<ReadonlySet<string>>(new Set())
   const [focus,setFocus]=useState(0)
   const [reset,setReset]=useState(0)
-  const [refresh,setRefresh]=useState(0)
+  const refreshGraph=useRef(()=>{})
+  const generation=useRef(0)
   const [run,setRun]=useState<ActiveRun|null>(null)
   const [starting,setStarting]=useState(false)
   const [error,setError]=useState('')
@@ -44,38 +46,58 @@ function GraphApp() {
   }
   useEffect(()=>{
     updateProjects().catch(error=>{setError(error.message);setLoaded(true)})
-    const reload=()=>{updateProjects().catch(error=>setError(error.message));setRefresh(v=>v+1)}
+    const reload=()=>{updateProjects().catch(error=>setError(error.message));refreshGraph.current()}
     window.addEventListener('focus',reload)
     return ()=>window.removeEventListener('focus',reload)
   },[])
 
   useEffect(()=>{
     if (!revision) return
-    let active=true
+    const epoch=++generation.current
+    const abort=new AbortController()
     const query=new URLSearchParams({revision,view:'graph'})
     if (profile) query.set('profile',profile)
-    request<Snapshot>('/api/snapshot?'+query).then(data=>{
-      if (active) setSnapshot(data)
-    }).catch(error=>{
-      if (active) setError(error.message)
-    })
-    return ()=>{active=false}
-  },[revision,profile,refresh])
-
-  useEffect(()=>{
-    if (!revision) return
-    let timeout:number|undefined
-    const stream=new EventSource('/api/events?'+new URLSearchParams({revision}))
-    stream.onmessage=({data})=>{
-      const {event}=JSON.parse(data)
-      if (event.state || event.tool?.startsWith('submit_')) {
-        window.clearTimeout(timeout)
-        timeout=window.setTimeout(()=>setRefresh(n=>n+1),250)
+    let timer:number|undefined, fetching=false, pending=false
+    async function refresh() {
+      if (epoch!==generation.current || fetching) return
+      fetching=true;pending=false;timer=undefined
+      try {
+        const response=await fetch('/api/snapshot?'+query,{signal:abort.signal})
+        const data=await response.json() as Snapshot & {error?:string}
+        if (!response.ok) throw new Error(data.error || response.statusText)
+        if (epoch===generation.current && data.graph?.revision===revision &&
+            (!profile || data.profile===profile)) {
+          setSnapshot(data)
+          if (!profile && data.profile) setProfile(data.profile)
+        }
+      } catch (error) {
+        if (epoch===generation.current && !abort.signal.aborted) setError(String(error))
+      } finally {
+        fetching=false
+        if (pending && epoch===generation.current) queueRefresh()
       }
     }
-    stream.addEventListener('run',()=>setRefresh(n=>n+1))
-    return ()=>{stream.close();window.clearTimeout(timeout)}
-  },[revision])
+    function queueRefresh() {
+      pending=true
+      if (!fetching && timer===undefined) timer=window.setTimeout(refresh,100)
+    }
+    refreshGraph.current=queueRefresh
+    const stream=new EventSource('/api/events?'+new URLSearchParams({revision}))
+    stream.onmessage=({data})=>{
+      const item=JSON.parse(data)
+      const state=item.event.state
+      if (state || item.event.tool?.startsWith('submit_')) queueRefresh()
+    }
+    stream.addEventListener('run',queueRefresh)
+    void refresh()
+    return ()=>{
+      generation.current++
+      abort.abort()
+      stream.close()
+      window.clearTimeout(timer)
+      refreshGraph.current=()=>{}
+    }
+  },[revision,profile])
 
   useEffect(()=>{
     let active=true
@@ -98,12 +120,16 @@ function GraphApp() {
       .some(value=>value.toLowerCase().includes(query)))
       .sort((a,b)=>Number(b.name.toLowerCase()===query)-Number(a.name.toLowerCase()===query)).slice(0,12)
   },[snapshot,search])
-  const counts=Object.values(snapshot?.results || {})
+  const counts=snapshot?.graph?.counts
+  const visible=useMemo(()=>new Set(snapshot?.graph?.nodes.map(node=>node.id) || []),[snapshot])
+  const visibleSelected=useMemo(()=>new Set([...selected].filter(id=>visible.has(id))),[selected,visible])
+  const scope=snapshot && {root:snapshot.root,revision,profile:snapshot.profile,version:LAYOUT_VERSION}
   const pending=Object.values(snapshot?.tasks || {}).filter(task=>['CONNECTING','SEMANTICIZING','WAITING_DEPENDENCIES'].includes(task.state)).length
 
   function selectRevision(id:string) {
+    if (id===revision) return
+    generation.current++
     setRevision(id);setProfile('');setSnapshot(undefined);setSelected(new Set());setSearch('')
-    setReset(n=>n+1)
   }
   async function registerProject() {
     if (!window.reviewDesktop) {
@@ -191,35 +217,44 @@ function GraphApp() {
         <input id="node-search" placeholder="함수·클래스·파일 검색" value={search}
           onChange={e=>setSearch(e.target.value)} onKeyDown={e=>{if (e.key==='Escape') setSearch('')}}/>
         {!!search.trim() && <div className="map-search-results">
-          {matches.length ? matches.map(item=><button type="button" key={item.id} onClick={()=>searchSelect(item.id)}>
-            <strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}</small>
-          </button>) : <p>일치하는 코드 단위가 없습니다.</p>}
+          {matches.length ? matches.map(item=><div className="map-search-item" key={item.id}>
+            <button type="button" onClick={()=>searchSelect(item.id)}>
+              <strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}</small>
+            </button>
+            {snapshot?.results[item.id]?.status==='partial' && <button type="button" className="partial-link"
+              onClick={()=>open(item.id)}>부분 결과</button>}
+          </div>) : <p>일치하는 코드 단위가 없습니다.</p>}
         </div>}
       </form>
       {!!snapshot?.profiles.length && <select aria-label="분석 프로필" value={snapshot.profile}
-        onChange={e=>{setProfile(e.target.value);setSnapshot(undefined)}}>
+        onChange={e=>{generation.current++;setProfile(e.target.value);setSnapshot(undefined)}}>
         {snapshot.profiles.map(item=><option key={item} value={item}>{profileLabel(item)}</option>)}
       </select>}
       <button onClick={()=>setReset(n=>n+1)}>시점 초기화</button>
     </section>
-    {error && <div className="map-error" role="alert">{error} <button onClick={()=>{setError('');void updateProjects().catch(e=>setError(e.message));setRefresh(n=>n+1)}}>다시 연결</button></div>}
+    {error && <div className="map-error" role="alert">{error} <button onClick={()=>{setError('');void updateProjects().catch(e=>setError(e.message));refreshGraph.current()}}>다시 연결</button></div>}
     <div className={'map-workspace'+(preferences.compactExplorer?' compact-explorer':'')}>
       <Explorer key={revision} snapshot={snapshot} selected={selected} select={selectNodes}/>
     <section className="map-stage" aria-label="3D 관계 공간">
-      <Graph snapshot={snapshot} selected={selected} focus={focus} reset={reset} choose={choose} open={open}/>
+      {scope && <Graph key={JSON.stringify(scope)} scope={scope} graph={snapshot?.graph} selected={visibleSelected}
+        focus={focus} reset={reset} choose={choose} open={open} report={setError}/>}
       {!snapshot && <div className="map-empty">{revision || !loaded?'프로젝트를 불러오는 중…':'Python 프로젝트를 등록해 그래프를 시작하세요.'}</div>}
-      {snapshot && !Object.keys(snapshot.units).length && <div className="map-empty">표시할 Python 코드 단위가 없습니다.</div>}
+      {snapshot && counts?.completed===0 && <div className="map-empty">
+        <div><strong>완료 0 · 부분 제출 {counts.partial}</strong>
+          <p>{counts.partial ? '부분 결과는 검색 또는 검수 창에서 열 수 있습니다.' :
+            '분석을 시작하면 완료된 의미가 이 공간에 나타납니다.'}</p>
+        </div>
+      </div>}
       <div className="map-legend" aria-label="그래프 범례">
-        <span><i className="node-ready"/>의미 제출</span><span><i className="node-partial"/>부분 제출</span>
-        <span><i className="node-new"/>미분석</span>
+        <span><i className="node-ready"/>의미 완료</span>
         <span><i className="edge-call"/>호출</span><span><i className="edge-other"/>기타 관계</span>
         <span><i className="edge-candidate"/>후보·미해결</span><span><i className="edge-dep"/>의미 선행</span>
       </div>
     </section>
     </div>
     <footer className="map-footer">
-      <span role="status">{Object.keys(snapshot?.units || {}).length}개 단위 · 의미 {counts.filter(r=>r.status==='submitted').length} · 부분 {counts.filter(r=>r.status==='partial').length}
-        {' · 선택 '+selected.size+'개'}
+      <span role="status">{counts?.total || 0}개 단위 · 완료 {counts?.completed || 0} · 부분 제출 {counts?.partial || 0}
+        {' · 선택 '+visibleSelected.size+'개 / 대상 '+selected.size+'개'}
         {run?.state==='running' ? ' · 분석 중' : pending ? ' · 대기 또는 재개 가능 '+pending+'개' : ''}</span>
       <span>드래그 회전 · Shift+드래그 이동 · 휠 확대 · Ctrl+클릭 추가 · 더블클릭 상세</span>
     </footer>

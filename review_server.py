@@ -14,6 +14,7 @@ from agent import analyze
 from chatgpt_auth import ChatGPTAuth, ServiceError
 from dependency_store import read_state, set_state
 from main import export, register
+from graph_view import completed_graph
 from responses import DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, Responses
 from source import database, encode, load_snapshot
 
@@ -188,6 +189,7 @@ class Handler(BaseHTTPRequestHandler):
     def snapshot(self, db_path, query):
         revision = query["revision"]
         with database(db_path) as db:
+            db.execute("BEGIN")
             root, snap = load_snapshot(db, revision)
             profiles = [raw for raw, in db.execute(
                 "SELECT profile FROM event WHERE snapshot=? UNION SELECT profile FROM result WHERE snapshot=? UNION SELECT profile FROM analysis_task WHERE snapshot=? "
@@ -209,7 +211,9 @@ class Handler(BaseHTTPRequestHandler):
         view = query.get("view")
         if view and "profile" in query and profile and profile not in profiles:
             raise ValueError("Unknown analysis profile.")
+        graph = None
         if view == "graph":
+            graph = completed_graph(revision, units, results, tasks)
             files, feedback = {}, []
             results = {uid: {**conn, "status": results.get(uid, {}).get("status", "")}
                        for uid, conn in connections.items()} | {
@@ -226,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
             connections, dependencies, feedback = {}, {}, []
             tasks = {uid: tasks[uid]} if uid in tasks else {}
         self.json(dict(root=root, profiles=profiles, profile=profile, units=units,
-                       results=results, tasks=tasks, connections=connections, dependencies=dependencies,
+                       results=results, tasks=tasks, connections=connections, dependencies=dependencies, graph=graph,
                        feedback=feedback, issues=snap["issues"],
                        file_paths=sorted(files if view != "graph" else snap["files"]),
                        files={name: file["source"] for name, file in files.items()}))

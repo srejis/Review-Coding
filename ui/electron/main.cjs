@@ -1,7 +1,8 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const path = require('node:path')
-const { mkdir, readFile, rename, writeFile } = require('node:fs/promises')
+const { createHash, randomUUID } = require('node:crypto')
+const { mkdir, readFile, rename, writeFile, unlink } = require('node:fs/promises')
 const { createInterface } = require('node:readline')
 
 app.setName('Review-Coding')
@@ -184,6 +185,54 @@ ipcMain.handle('review:save-preferences', async (event, value) => {
   })
   settingsQueue = operation.catch(() => {})
   await operation
+})
+function layoutFile(scope) {
+  if (!scope || typeof scope.root !== 'string' || scope.root.length > 8192 ||
+      typeof scope.revision !== 'string' || !/^[0-9a-f]{64}$/.test(scope.revision) ||
+      typeof scope.profile !== 'string' || scope.profile.length > 4096 ||
+      typeof scope.version !== 'string' || !/^[a-z0-9-]{1,40}$/.test(scope.version)) {
+    throw new Error('Invalid graph layout scope.')
+  }
+  const key = JSON.stringify([scope.root, scope.revision, scope.profile, scope.version])
+  const hash = createHash('sha256').update(key).digest('hex')
+  return path.join(path.dirname(settingsPath()), 'graph-layouts', hash + '.json')
+}
+
+function cleanLayout(cache) {
+  if (!cache || !cache.positions || typeof cache.positions !== 'object' ||
+      Array.isArray(cache.positions) || !Array.isArray(cache.pairs)) return null
+  const entries = Object.entries(cache.positions)
+  if (entries.length > 20000 || cache.pairs.length > 160000) return null
+  const positions = Object.create(null)
+  for (const [id, point] of entries) {
+    if (!id || id.length > 4096 || !point ||
+        !['x','y','z'].every(axis=>Number.isFinite(point[axis]) && Math.abs(point[axis]) <= 1e6)) continue
+    positions[id] = { x:point.x, y:point.y, z:point.z }
+  }
+  const pairs = cache.pairs.filter(pair=>Array.isArray(pair) && pair.length === 2 &&
+    pair.every(id=>typeof id === 'string' && Object.hasOwn(positions,id)))
+  return { positions, pairs }
+}
+
+ipcMain.handle('review:load-layout', async (event, scope) => {
+  trust(event, ['graph'])
+  const file = layoutFile(scope)
+  try { return cleanLayout(JSON.parse(await readFile(file,'utf8'))) }
+  catch { return null }
+})
+ipcMain.handle('review:save-layout', async (event, scope, value) => {
+  trust(event, ['graph'])
+  const file = layoutFile(scope)
+  const cache = cleanLayout(value)
+  if (!cache) throw new Error('Invalid graph layout.')
+  const temp = file + '.' + randomUUID() + '.tmp'
+  await mkdir(path.dirname(file), { recursive:true })
+  try {
+    await writeFile(temp, JSON.stringify(cache), 'utf8')
+    await rename(temp,file)
+  } finally {
+    await unlink(temp).catch(()=>{})
+  }
 })
 ipcMain.handle('review:settings', event => {
   trust(event, ['graph','management','detail','progress'])

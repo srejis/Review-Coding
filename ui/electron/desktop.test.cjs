@@ -24,12 +24,31 @@ test('Windows Electron uses real snapshots and manages independent detail window
     await main.getByRole('combobox', { name: '프로젝트·스냅샷' }).selectOption(project.id)
     const select = main.getByRole('combobox', { name: '분석 프로필' })
     await select.waitFor()
-    const profile = await select.inputValue()
-    const getSnapshot = (view, unit) => fetch(origin + '/api/snapshot?' +
+    const load = (profile, view, unit) => fetch(origin + '/api/snapshot?' +
       new URLSearchParams({ revision: project.id, profile, view, ...(unit ? { unit } : {}) }))
       .then(response => response.json())
-    const snapshot = await getSnapshot('graph')
-    assert.deepEqual(snapshot.files, {})
+    const initialProfile=await select.inputValue()
+    const initialView=await load(initialProfile,'graph')
+    if (initialView.graph.counts.completed===0 && initialView.graph.counts.partial) {
+      await main.getByText(/완료 0 · 부분 제출/).first().waitFor()
+      await main.getByRole('textbox',{name:'함수·클래스·파일 검색'}).fill('normalize')
+      const partialPromise=desktop.waitForEvent('window')
+      await main.getByRole('button',{name:'부분 결과'}).click()
+      const partial=await partialPromise
+      await partial.getByRole('heading',{name:'normalize',exact:true}).waitFor()
+      assert.equal(await partial.locator('.detail-badge').textContent(),'부분 제출')
+      await partial.close()
+      await main.getByRole('textbox',{name:'함수·클래스·파일 검색'}).fill('')
+    }
+    const candidates=await Promise.all(initialView.profiles.map(async profile=>({profile,data:await load(profile,'graph')})))
+    const completed=candidates.find(({data})=>data.graph.nodes.some(node=>node.name==='normalize') &&
+      data.graph.nodes.some(node=>node.name==='append_scores') && data.graph.edges.some(edge=>edge.source!==edge.target))
+    assert.ok(completed,'Register a completed normalize and append_scores profile.')
+    const profile=completed.profile
+    if (profile!==initialProfile) await select.selectOption(profile)
+    const getSnapshot=(view,unit)=>load(profile,view,unit)
+    const snapshot=completed.data
+    assert.deepEqual(snapshot.files,{})
     const normalize = Object.values(snapshot.units).find(unit => unit.name === 'normalize')
     const scores = Object.values(snapshot.units).find(unit => unit.name === 'append_scores')
     assert.ok(normalize && scores)
@@ -54,6 +73,14 @@ test('Windows Electron uses real snapshots and manages independent detail window
     const changed = async previous => {
       await main.waitForFunction(value => document.querySelector('canvas').toDataURL() !== value, previous)
     }
+    await main.waitForFunction(()=>{
+      const canvas=document.querySelector('canvas')
+      if (!canvas?.width || !canvas?.height) return false
+      return canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((value,i)=>i%4===3 && value>0)
+    })
+    const paint=()=>main.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+    await main.getByRole('button',{name:'시점 초기화'}).click()
+    await paint()
     const initial = await pixels()
     await drag()
     await changed(initial)
@@ -76,11 +103,11 @@ test('Windows Electron uses real snapshots and manages independent detail window
     const selection=main.locator('.map-footer [role=status]')
     const waitSelection=count=>selection.getByText(new RegExp('선택 '+count+'개')).waitFor()
     await main.getByRole('button',{name:'normalize.py',exact:true}).click()
-    const fileCount=Object.values(snapshot.units).filter(unit=>unit.file===normalize.file).length
+    const fileCount=snapshot.graph.nodes.filter(unit=>snapshot.units[unit.id].file===normalize.file).length
     await waitSelection(fileCount)
     const fileCamera=await pixels()
     await main.getByRole('button',{name:'check_cases',exact:true}).click()
-    await waitSelection(Object.keys(snapshot.units).length)
+    await waitSelection(snapshot.graph.counts.completed)
     await changed(fileCamera)
     assert.equal(desktop.windows().length,1)
     await choose('normalize')
@@ -145,7 +172,8 @@ test('Windows Electron uses real snapshots and manages independent detail window
     assert.equal(await pixels(),preserved)
 
     const choices = await select.locator('option').evaluateAll(items=>items.map(item=>item.value))
-    const alternative = choices.find(value=>value!==profile)
+    const alternative = choices.find(value=>value!==profile &&
+      candidates.find(item=>item.profile===value)?.data.graph.nodes.some(node=>node.name==='normalize'))
     if (alternative) {
       await select.selectOption(alternative)
       await main.waitForFunction(value =>
@@ -175,29 +203,20 @@ test('Windows Electron uses real snapshots and manages independent detail window
       const all = Object.values(denseGraph.units)
       const folder = all.find(unit=>unit.file.includes('/'))?.file.split('/')[0]
       assert.ok(folder && all.length>=170)
-      const {treeCoordinates}=await import('../src/treeLayout.ts')
-      const positions=treeCoordinates(all)
-      const reversed=treeCoordinates([...all].reverse())
-      for (const [id,point] of positions) assert.deepEqual(point,reversed.get(id))
-      const [originPoint,...rest]=positions.values()
-      const vectors=rest.map(p=>[p.x-originPoint.x,p.y-originPoint.y,p.z-originPoint.z])
-      const first=vectors.find(v=>Math.hypot(...v)>0)
-      const cross=v=>[first[1]*v[2]-first[2]*v[1],first[2]*v[0]-first[0]*v[2],first[0]*v[1]-first[1]*v[0]]
-      const normal=vectors.map(cross).find(v=>Math.hypot(...v)>0)
-      assert.ok(normal && vectors.some(v=>Math.abs(v.reduce((sum,n,i)=>sum+n*normal[i],0))>1e-4),
-        'The saved rembg units occupy a genuinely non-coplanar layout.')
+      const visible=new Set(denseGraph.graph.nodes.map(node=>node.id))
       const explorer=main.getByRole('complementary',{name:'파일 탐색기'})
       await explorer.getByRole('button',{name:folder,exact:true}).waitFor()
       const denseBefore=await pixels()
       await explorer.getByRole('button',{name:folder,exact:true}).click()
-      const count=all.filter(unit=>unit.file.split('/')[0]===folder).length
+      const count=all.filter(unit=>unit.file.split('/')[0]===folder && visible.has(unit.id)).length
       await waitSelection(count)
-      await changed(denseBefore)
+      if (count) await changed(denseBefore)
+      else assert.equal(await pixels(),denseBefore)
       await explorer.getByRole('button',{name:folder+' 폴더 펼치기·접기'}).click()
       const choice = all.find(unit=>unit.file.split('/')[0]===folder)
       await explorer.getByRole('searchbox',{name:'파일·폴더 검색'}).fill(choice.file)
       await explorer.locator('button[title]').filter({hasText:path.basename(choice.file)}).last().click()
-      await waitSelection(all.filter(unit=>unit.file===choice.file).length)
+      await waitSelection(all.filter(unit=>unit.file===choice.file && visible.has(unit.id)).length)
       assert.equal(await main.locator('.map-selection').count(),0)
       if (screenshot) await main.screenshot({path:path.join(screenshot,'review-coding-rembg-tree.png')})
       await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(project.id)
@@ -245,6 +264,76 @@ test('Windows Electron uses real snapshots and manages independent detail window
     await end
     assert.equal(desktop.windows().length,0)
     await assert.rejects(fetch(origin+'/api/projects'))
+  } finally {
+    await desktop.close().catch(()=>{})
+  }
+})
+
+test('late snapshot responses are isolated and coordinates survive restart or cache damage', {
+  skip: process.env.REVIEW_CODING_TEST_LAYOUT !== 'isolated' && 'Requires a disposable copied data directory.',
+  timeout: 90000
+}, async ()=>{
+  const {readFile,writeFile}=require('node:fs/promises')
+  const {createHash}=require('node:crypto')
+  const start=()=>_electron.launch({args:[path.resolve(__dirname,'..')],timeout:25000})
+  let desktop=await start()
+  try {
+    let main=await desktop.firstWindow()
+    const origin=new URL(main.url()).origin
+    const projects=await fetch(origin+'/api/projects').then(response=>response.json())
+    const samples=projects.find(project=>path.basename(project.root)==='check_cases')
+    const other=projects.find(project=>path.basename(project.root)==='97_rembg')
+    assert.ok(samples && other)
+    let lock, unblock
+    const held=new Promise(resolve=>{lock=resolve})
+    const gate=new Promise(resolve=>{unblock=resolve})
+    const match=url=>url.pathname==='/api/snapshot' && url.searchParams.get('revision')===samples.id &&
+      url.searchParams.get('view')==='graph'
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await main.locator('.map-footer').getByText(/173개 단위/).waitFor()
+    await main.route(match,async route=>{
+      const response=await route.fetch()
+      lock()
+      await gate
+      await route.fulfill({response}).catch(()=>{})
+    },{times:1})
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(samples.id)
+    await held
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await main.locator('.map-footer').getByText(/173개 단위/).waitFor()
+    unblock()
+    const profile=await main.getByRole('combobox',{name:'분석 프로필'}).inputValue()
+    const key=JSON.stringify([other.root,other.id,profile,'incremental-v1'])
+    const cache=path.join(data,'graph-layouts',createHash('sha256').update(key).digest('hex')+'.json')
+    async function cached() {
+      for (let i=0;i<120;i++) {
+        const value=await readFile(cache,'utf8').then(JSON.parse).catch(()=>null)
+        if (value && Object.keys(value.positions).length===2) return value
+        await new Promise(resolve=>setTimeout(resolve,70))
+      }
+      throw new Error('Saved coordinates could not be loaded.')
+    }
+    const previous=await cached()
+    assert.match(await main.locator('.map-footer').textContent(),/173개 단위 · 완료 2 · 부분 제출 5/)
+    await desktop.close()
+
+    desktop=await start()
+    main=await desktop.firstWindow()
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await main.locator('.map-footer').getByText(/완료 2 · 부분 제출 5/).waitFor()
+    await main.waitForFunction(()=>{
+      const canvas=document.querySelector('canvas')
+      return canvas?.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((value,i)=>i%4===3&&value)
+    })
+    assert.deepEqual(await cached(),previous)
+    await desktop.close()
+
+    await writeFile(cache,'{damaged cache','utf8')
+    desktop=await start()
+    main=await desktop.firstWindow()
+    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await main.locator('.map-footer').getByText(/완료 2 · 부분 제출 5/).waitFor()
+    assert.equal(Object.keys((await cached()).positions).length,2)
   } finally {
     await desktop.close().catch(()=>{})
   }

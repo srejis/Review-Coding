@@ -94,3 +94,8 @@
 .progress-stats dt { color:#536d65; }
 .progress-stats dd { margin:0; overflow-wrap:anywhere; }
 .progress-actions { display:flex; gap:8px; }
+.map-search-item { display:flex; align-items:center; }
+.map-search-results .partial-link { width:auto; white-space:nowrap; color:#f0c47f; }
+.map-empty { text-align:center; }
+.map-empty strong { color:#e1eeef; font-size:17px; }
+.map-empty p { font-size:13px; }

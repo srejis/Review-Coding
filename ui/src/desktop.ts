@@ -1,8 +1,10 @@
 import {useEffect, useState} from 'react'
 import {LUNA, request} from './api'
 import type {Run} from './api'
+import type {LayoutCache} from './incrementalLayout'
 
 export type NodeIdentity = { root: string; revision: string; profile: string; unit: string }
+export type LayoutScope = {root:string; revision:string; profile:string; version:string}
 export type Preferences = {model:string; effort:string; compactExplorer:boolean}
 export const defaults:Preferences={model:LUNA,effort:'medium',compactExplorer:false}
 
@@ -17,6 +19,8 @@ declare global {
       openProgress: (revision:string)=>Promise<void>
       preferences: ()=>Promise<Preferences>
       savePreferences: (value:Preferences)=>Promise<void>
+      loadLayout: (scope:LayoutScope)=>Promise<LayoutCache|null>
+      saveLayout: (scope:LayoutScope,cache:LayoutCache)=>Promise<void>
     }
   }
 }
