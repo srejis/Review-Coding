@@ -1,15 +1,18 @@
 import {lazy, Suspense, useEffect, useMemo, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import Graph from './Graph'
+import Explorer from './Explorer'
 import {request} from './api'
-import type {Project, Run, Snapshot} from './api'
-import {profileLabel} from './desktop'
+import type {ActiveRun, Project, Snapshot} from './api'
+import {openProgress, openSettings, profileLabel, startAnalysis, usePreferences} from './desktop'
 import type {NodeIdentity} from './desktop'
 import './style.css'
 import './desktop.css'
 
 const Detail=lazy(()=>import('./Detail'))
 const Management=lazy(()=>import('./Management'))
+const Progress=lazy(()=>import('./Progress'))
+const Settings=lazy(()=>import('./Settings'))
 const mode=new URLSearchParams(location.search)
 
 function navigateWindow(mode:string, identity?:NodeIdentity) {
@@ -22,14 +25,16 @@ function GraphApp() {
   const [profile,setProfile]=useState('')
   const [snapshot,setSnapshot]=useState<Snapshot>()
   const [search,setSearch]=useState('')
-  const [selected,setSelected]=useState('')
+  const [selected,setSelected]=useState<ReadonlySet<string>>(new Set())
   const [focus,setFocus]=useState(0)
   const [reset,setReset]=useState(0)
   const [refresh,setRefresh]=useState(0)
-  const [run,setRun]=useState<Run>()
+  const [run,setRun]=useState<ActiveRun|null>(null)
+  const [starting,setStarting]=useState(false)
   const [error,setError]=useState('')
   const [busy,setBusy]=useState(false)
   const [loaded,setLoaded]=useState(false)
+  const preferences=usePreferences(setError)
 
   async function updateProjects() {
     const list=await request<Project[]>('/api/projects')
@@ -68,9 +73,23 @@ function GraphApp() {
         timeout=window.setTimeout(()=>setRefresh(n=>n+1),250)
       }
     }
-    stream.addEventListener('run',event=>setRun(JSON.parse(event.data)))
+    stream.addEventListener('run',()=>setRefresh(n=>n+1))
     return ()=>{stream.close();window.clearTimeout(timeout)}
   },[revision])
+
+  useEffect(()=>{
+    let active=true
+    let timer:number|undefined
+    const poll=async()=>{
+      try {
+        const state=await request<ActiveRun|null>('/api/run')
+        if (active) setRun(state)
+      } catch (error) {if (active) setError(String(error))}
+      if (active) timer=window.setTimeout(poll,1250)
+    }
+    void poll()
+    return ()=>{active=false;window.clearTimeout(timer)}
+  },[])
 
   const matches=useMemo(()=>{
     const query=search.trim().toLowerCase()
@@ -79,15 +98,11 @@ function GraphApp() {
       .some(value=>value.toLowerCase().includes(query)))
       .sort((a,b)=>Number(b.name.toLowerCase()===query)-Number(a.name.toLowerCase()===query)).slice(0,12)
   },[snapshot,search])
-  const node=snapshot?.units[selected]
   const counts=Object.values(snapshot?.results || {})
-  const current=node && snapshot?.results[node.id]
-  const currentTask=node && snapshot?.tasks[node.id]
-  const unmapped=current?.relations.filter(edge=>!edge.target && edge.certainty!=="confirmed").length || 0
   const pending=Object.values(snapshot?.tasks || {}).filter(task=>['CONNECTING','SEMANTICIZING','WAITING_DEPENDENCIES'].includes(task.state)).length
 
   function selectRevision(id:string) {
-    setRevision(id);setProfile('');setSnapshot(undefined);setSelected('');setSearch('');setRun(undefined)
+    setRevision(id);setProfile('');setSnapshot(undefined);setSelected(new Set());setSearch('')
     setReset(n=>n+1)
   }
   async function registerProject() {
@@ -106,21 +121,48 @@ function GraphApp() {
     } catch (error) { setError(String(error)) }
     finally { setBusy(false) }
   }
-  async function choose(unit:string, center=false) {
+  function selectNodes(ids:string[]) {
+    setSelected(new Set(ids))
+    setFocus(n=>n+1)
+  }
+  function choose(id:string|null,toggle:boolean) {
+    setSelected(current=>{
+      if (!id || !toggle) return new Set(id ? [id] : [])
+      const next=new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function searchSelect(id:string) {
+    selectNodes([id])
+    setSearch('')
+  }
+  async function open(unit:string) {
     if (!snapshot?.units[unit]) return
-    setSelected(unit)
-    if (center) {
-      setFocus(n=>n+1)
-      setSearch('')
-    }
     const identity={root:snapshot.root,revision,profile:snapshot.profile,unit}
     try {
       if (window.reviewDesktop) await window.reviewDesktop.openDetail(identity)
       else navigateWindow('detail',identity)
-    } catch (error) { setError(String(error)) }
+    } catch (error) {setError(String(error))}
+  }
+  async function analyze() {
+    if (!revision || starting || run?.state==='running') return
+    setStarting(true);setError('')
+    try {
+      await startAnalysis(revision)
+      setRun(await request<ActiveRun|null>('/api/run'))
+      await openProgress(revision)
+    } catch (error) {setError(String(error))}
+    finally {setStarting(false)}
+  }
+  function showProgress() {
+    const target=run?.state==='running' ? run.revision : revision
+    if (target) void openProgress(target).catch(error=>setError(String(error)))
   }
   async function manage() {
-    const identity=node && snapshot ? {root:snapshot.root,revision,profile:snapshot.profile,unit:node.id} : undefined
+    const unit=selected.size===1 ? [...selected][0] : ''
+    const identity=unit && snapshot ? {root:snapshot.root,revision,profile:snapshot.profile,unit} : undefined
     try {
       if (window.reviewDesktop) await window.reviewDesktop.openManagement(identity)
       else navigateWindow('management',identity)
@@ -136,16 +178,20 @@ function GraphApp() {
           {projects.map(item=><option key={item.id} value={item.id}>{item.root.split(/[\\/]/).at(-1)} · {item.id.slice(0,8)}</option>)}
         </select>
         <button onClick={()=>registerProject()} disabled={busy}>프로젝트 등록</button>
-        <button onClick={()=>manage()}>분석·검수 관리</button>
+        <button className="map-primary" onClick={()=>analyze()}
+          disabled={!revision || starting || run?.state==='running'}>분석 시작</button>
+        <button disabled={!revision} onClick={showProgress}>분석 진행</button>
+        <button onClick={()=>openSettings().catch(error=>setError(String(error)))}>설정</button>
+        <button aria-label="검수·이력 및 내보내기" title="검수·이력 및 내보내기" onClick={()=>manage()}>⋯</button>
       </div>
     </header>
     <section className="map-tools" aria-label="그래프 탐색">
-      <form className="map-search" onSubmit={e=>{e.preventDefault();if (matches[0]) void choose(matches[0].id,true)}}>
+      <form className="map-search" onSubmit={e=>{e.preventDefault();if (matches[0]) searchSelect(matches[0].id)}}>
         <label htmlFor="node-search" className="sr-only">함수·클래스·파일 검색</label>
         <input id="node-search" placeholder="함수·클래스·파일 검색" value={search}
           onChange={e=>setSearch(e.target.value)} onKeyDown={e=>{if (e.key==='Escape') setSearch('')}}/>
         {!!search.trim() && <div className="map-search-results">
-          {matches.length ? matches.map(item=><button type="button" key={item.id} onClick={()=>choose(item.id,true)}>
+          {matches.length ? matches.map(item=><button type="button" key={item.id} onClick={()=>searchSelect(item.id)}>
             <strong>{item.name}</strong><small>{item.kind} · {item.file}:{item.line}</small>
           </button>) : <p>일치하는 코드 단위가 없습니다.</p>}
         </div>}
@@ -157,25 +203,25 @@ function GraphApp() {
       <button onClick={()=>setReset(n=>n+1)}>시점 초기화</button>
     </section>
     {error && <div className="map-error" role="alert">{error} <button onClick={()=>{setError('');void updateProjects().catch(e=>setError(e.message));setRefresh(n=>n+1)}}>다시 연결</button></div>}
+    <div className={'map-workspace'+(preferences.compactExplorer?' compact-explorer':'')}>
+      <Explorer key={revision} snapshot={snapshot} selected={selected} select={selectNodes}/>
     <section className="map-stage" aria-label="3D 관계 공간">
-      <Graph snapshot={snapshot} selected={selected} focus={focus} reset={reset} choose={choose}/>
+      <Graph snapshot={snapshot} selected={selected} focus={focus} reset={reset} choose={choose} open={open}/>
       {!snapshot && <div className="map-empty">{revision || !loaded?'프로젝트를 불러오는 중…':'Python 프로젝트를 등록해 그래프를 시작하세요.'}</div>}
       {snapshot && !Object.keys(snapshot.units).length && <div className="map-empty">표시할 Python 코드 단위가 없습니다.</div>}
-      {node && <div className="map-selection"><strong>{node.name}</strong><span>{node.file}:{node.line}</span>
-        <span>{currentTask?.state==="QUALITY_VERIFIED"?"독립 품질 검증":
-          current?.status==="partial"?"부분 제출":current?.status==="submitted"?"의미 제출":
-          current?.status==="stale"?"오래된 결과":currentTask?.state || "미분석"}{unmapped ? " · 대상 미확정 "+unmapped+"개" : ""}</span></div>}
       <div className="map-legend" aria-label="그래프 범례">
         <span><i className="node-ready"/>의미 제출</span><span><i className="node-partial"/>부분 제출</span>
-        <span><i className="node-new"/>미분석</span><span><i className="node-stale"/>오래됨</span>
+        <span><i className="node-new"/>미분석</span>
         <span><i className="edge-call"/>호출</span><span><i className="edge-other"/>기타 관계</span>
         <span><i className="edge-candidate"/>후보·미해결</span><span><i className="edge-dep"/>의미 선행</span>
       </div>
     </section>
+    </div>
     <footer className="map-footer">
       <span role="status">{Object.keys(snapshot?.units || {}).length}개 단위 · 의미 {counts.filter(r=>r.status==='submitted').length} · 부분 {counts.filter(r=>r.status==='partial').length}
+        {' · 선택 '+selected.size+'개'}
         {run?.state==='running' ? ' · 분석 중' : pending ? ' · 대기 또는 재개 가능 '+pending+'개' : ''}</span>
-      <span>드래그 회전 · Shift+드래그 이동 · 휠 확대</span>
+      <span>드래그 회전 · Shift+드래그 이동 · 휠 확대 · Ctrl+클릭 추가 · 더블클릭 상세</span>
     </footer>
   </main>
 }
@@ -183,13 +229,14 @@ function GraphApp() {
 function Root() {
   if (mode.has('login')) {
     return <main className="detail-shell"><h1>{mode.get('login')==='connected'?'ChatGPT 연결 완료':'ChatGPT 연결 실패'}</h1>
-      <p>Review-Coding의 분석·검수 관리 창으로 돌아가세요.</p>
+      <p>Review-Coding의 설정 창으로 돌아가세요.</p>
       {mode.get('login')!=='connected' && <p role="alert">{mode.get('login')}</p>}
-      {!window.reviewDesktop && <a href="/?mode=management">관리 화면으로 이동</a>}
+      {!window.reviewDesktop && <a href="/?mode=settings">설정 화면으로 이동</a>}
     </main>
   }
   return <Suspense fallback={<p className="empty">화면을 불러오는 중…</p>}>
-    {mode.get('mode')==='detail'?<Detail/>:mode.get('mode')==='management'?<Management/>:<GraphApp/>}
+    {mode.get('mode')==='detail'?<Detail/>:mode.get('mode')==='management'?<Management/>:mode.get('mode')==='settings'?<Settings/>:
+      mode.get('mode')==='progress'?<Progress/>:<GraphApp/>}
   </Suspense>
 }
 

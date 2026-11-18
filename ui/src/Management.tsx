@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react'
-import {LUNA, request} from './api'
-import type {Account, Project, Result, Run, Snapshot, Trace, Unit} from './api'
+import {request} from './api'
+import {openProgress, openSettings, startAnalysis, usePreferences} from './desktop'
+import type {Project, Result, Run, Snapshot, Trace, Unit} from './api'
 
 const categoryOptions = ['검수 메모','설명 누락','잘못된 연결','너무 추상적','근거 없는 의미']
 const certainty: Record<string,string> = { confirmed:'근거 포함 · 모델 확정', candidate:'후보', unresolved:'미해결', external:'외부 경계' }
@@ -94,10 +95,6 @@ export default function Management() {
   const [snapshot,setSnapshot]=useState<Snapshot>()
   const [profile,setProfile]=useState(initial.get('profile') || '')
   const [selected,setSelected]=useState(initial.get('unit') || '')
-  const [account,setAccount]=useState<Account>()
-  const [accountChoice,setAccountChoice]=useState('')
-  const [model,setModel]=useState(LUNA)
-  const [effort,setEffort]=useState('medium')
   const [folder,setFolder]=useState('')
   const [filter,setFilter]=useState('')
   const [tab,setTab]=useState<'findings'|'events'|'feedback'>('findings')
@@ -109,18 +106,11 @@ export default function Management() {
   const [note,setNote]=useState('')
   const [busy,setBusy]=useState(false)
   const [refresh,setRefresh]=useState(0)
+  const preferences=usePreferences(setError)
 
   useEffect(() => {
     request<Project[]>('/api/projects').then(rows=>{setProjects(rows);setRevision(initial.get('revision') || rows[0]?.id || '')})
       .catch(e=>setError(e.message))
-    const refreshAccount = () => request<Account>('/api/account')
-      .then(value=>{setAccount(value);setAccountChoice(value.active || '')})
-      .catch(e=>setError(e.message))
-    refreshAccount()
-    window.addEventListener('focus', refreshAccount)
-    const login = new URLSearchParams(location.search).get('login')
-    if (login && login !== 'connected') setError(`ChatGPT 로그인 실패 · ${login}`)
-    return () => window.removeEventListener("focus", refreshAccount)
   }, [])
 
   useEffect(() => {
@@ -171,7 +161,6 @@ export default function Management() {
   const submitted=Object.values(snapshot?.results || {}).filter(value=>value.status==="submitted").length
   const partial=Object.values(snapshot?.results || {}).filter(value=>value.status==="partial").length
   const active=run?.state === 'running'
-  const modelAvailable=Boolean(account?.models.some(item=>item.id===model))
   function navigate(id:string,line?:number) {
     setSelected(id)
     setHighlight([line ?? snapshot?.units[id]?.line ?? 1])
@@ -185,50 +174,27 @@ export default function Management() {
     try { await work() } catch(e) { setError(e instanceof Error ? e.message : '요청 실패') }
     finally {setBusy(false)}
   }
-  const login=()=>action(async()=>{
-    if (window.reviewDesktop) {
-      await window.reviewDesktop.login(accountChoice || undefined)
-      return
-    }
-    const {url}=await request<{url:string}>('/api/login',{account:accountChoice || undefined})
-    location.assign(url)
-  })
   const register=()=>action(async()=>{
     const {id}=await request<{id:string}>('/api/register',{root:folder})
     setProjects(await request<Project[]>('/api/projects'));switchProject(id);setFolder('')
   })
   const analyze=(id?:string)=>action(async()=>{
-    setRun(await request<Run>('/api/analyze',{revision,model,effort,unit:id}))
-    setProfile('');setTab('events')
+    setRun(await startAnalysis(revision,id))
+    setProfile('');setTab('events');await openProgress(revision)
   })
 
   return <main className="shell">
     <header className="top">
       <div className="title"><span className="brand">RC</span><div><h1>Review-Coding</h1><p>Python 코드 검수</p></div></div>
-      <div className="auth">
-        {account?.accounts.length ? <select aria-label="ChatGPT 계정" value={accountChoice}
-          onChange={event=>setAccountChoice(event.target.value)}>
-          {account.accounts.map(choice=><option key={choice.id} value={choice.id}>{choice.label} · {choice.id.slice(-5)}</option>)}
-          <option value="">다른 계정 연결</option>
-        </select> : null}
-        {account?.auth==='chatgpt_plan_oauth' && <span className="connected">ChatGPT 연결됨</span>}
-        <button disabled={busy} data-oai-siwc-button onClick={login}>Continue with ChatGPT</button>
-      </div>
+      <button onClick={()=>action(openSettings)}>설정</button>
     </header>
     <section className="toolbar" aria-label="분석 실행">
-      <label>모델<select value={model} onChange={event=>setModel(event.target.value)}>
-        <option value={LUNA}>GPT-6 Luna</option>
-        {account?.models.filter(item=>item.id!==LUNA).map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
-      </select></label>
-      <label>추론<select value={effort} onChange={event=>setEffort(event.target.value)}>
-        {(account?.efforts || ['medium']).map(value=><option key={value}>{value}</option>)}
-      </select></label>
-      <button className="primary" disabled={!revision || !modelAvailable || busy || active} onClick={()=>analyze()}>분석·재개</button>
-      <button disabled={!unit || !modelAvailable || busy || active} onClick={()=>analyze(selected)}>선택 단위 분석</button>
-      {active && <button onClick={()=>action(async()=>{await request('/api/cancel',{})})}>중단</button>}
+      <span>{preferences.model} · {preferences.effort}</span>
+      <button className="primary" disabled={!revision || busy || active} onClick={()=>analyze()}>분석·재개</button>
+      <button disabled={!unit || busy || active} onClick={()=>analyze(selected)}>선택 단위 분석</button>
+      {active && <button onClick={()=>action(()=>openProgress(revision))}>분석 진행</button>}
       {run && <span className="muted" role="status">{run.error || ({running:'분석 중',partial:'부분 분석',unit_limit:'단위 한도 도달',finished:'완료',cancelled:'중단됨',time_limit:'시간 한도 도달'}[run.state] || run.state)}
         {run.remaining !== undefined && ` · 남은 단위 ${run.remaining}개`}</span>}
-      {!modelAvailable && <span className="muted">{account?.problem}</span>}
     </section>
     {error && <div role="alert" className="alert">{error}</div>}
     <div className="workspace">

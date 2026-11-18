@@ -1,39 +1,22 @@
 import {useEffect, useMemo, useRef} from 'react'
 import type {Snapshot} from './api'
 
-type Point = {x:number; y:number; z:number}
+import {treeCoordinates} from './treeLayout'
+import type {Point} from './treeLayout'
 type Node = Point & {id:string; name:string; color:string}
 type Projected = Node & {sx:number; sy:number; radius:number; depth:number}
 type Edge = {from:string; to:string; dependency:boolean; certain:boolean; kind:string}
 
-function spherical(index:number, count:number, radius:number):Point {
-  const y=1-2*(index+.5)/Math.max(count,1)
-  const angle=index*Math.PI*(3-Math.sqrt(5))
-  const plane=Math.sqrt(1-y*y)
-  return {x:radius*plane*Math.cos(angle),y:radius*y,z:radius*plane*Math.sin(angle)}
-}
-
 export function graphData(snapshot?:Snapshot) {
   const units=Object.values(snapshot?.units || {})
-  const files=new Map<string,typeof units>()
-  for (const unit of units) {
-    const group=files.get(unit.file)
-    if (group) group.push(unit)
-    else files.set(unit.file,[unit])
-  }
-  const nodes:Node[]=[]
-  for (const [index,group] of [...files.values()].entries()) {
-    const center=files.size===1 ? {x:0,y:0,z:0} : spherical(index,files.size,files.size<3?155:215)
-    const spread=files.size===1 ? 210 : Math.min(66,190/Math.sqrt(files.size))
-    group.forEach((unit,i)=>{
-      const offset=group.length===1 ? {x:0,y:0,z:0} : spherical(i,group.length,spread)
-      const status=snapshot?.results[unit.id]?.status
-      const state=snapshot?.tasks[unit.id]?.state
-      const color=state==='QUALITY_VERIFIED'?'#a3f1d3':status==='submitted'?'#42d6a0':
-        status==='partial'?'#e7b870':status==='stale'?'#ef8e83':'#7f969d'
-      nodes.push({id:unit.id,name:unit.name,color,x:center.x+offset.x,y:center.y+offset.y,z:center.z+offset.z})
-    })
-  }
+  const coordinates=treeCoordinates(units)
+  const nodes:Node[]=units.map(unit=>{
+    const status=snapshot?.results[unit.id]?.status
+    const state=snapshot?.tasks[unit.id]?.state
+    const color=state==='QUALITY_VERIFIED'?'#a3f1d3':status==='submitted'?'#42d6a0':
+      status==='partial'?'#e7b870':status==='stale'?'#ef8e83':'#7f969d'
+    return {id:unit.id,name:unit.name,color,...coordinates.get(unit.id)!}
+  })
   const edges:Edge[]=[]
   for (const [from,result] of Object.entries(snapshot?.results || {})) {
     if (result.status==='stale') continue
@@ -53,8 +36,9 @@ export function graphData(snapshot?:Snapshot) {
 const initialCamera=()=>({pitch:.12,yaw:-.35,zoom:1,panX:0,panY:0,target:{x:0,y:0,z:0}})
 const clamp=(value:number,min:number,max:number)=>Math.min(max,Math.max(min,value))
 
-export default function Graph({snapshot,selected,focus,reset,choose}:{
-  snapshot?:Snapshot; selected:string; focus:number; reset:number; choose:(id:string)=>void
+export default function Graph({snapshot,selected,focus,reset,choose,open}:{
+  snapshot?:Snapshot; selected:ReadonlySet<string>; focus:number; reset:number;
+  choose:(id:string|null,toggle:boolean)=>void; open:(id:string)=>void
 }) {
   const canvas=useRef<HTMLCanvasElement>(null)
   const projected=useRef<Projected[]>([])
@@ -62,8 +46,10 @@ export default function Graph({snapshot,selected,focus,reset,choose}:{
   const camera=useRef(initialCamera())
   const interaction=useRef<{x:number;y:number;startX:number;startY:number;pan:boolean}|null>(null)
   const {nodes,edges}=useMemo(()=>graphData(snapshot),[snapshot])
-  const latest=useRef({nodes,edges,selected,choose})
-  latest.current={nodes,edges,selected,choose}
+  const latest=useRef({nodes,edges,selected,choose,open})
+  latest.current={nodes,edges,selected,choose,open}
+
+  const lastClick=useRef<string|null>(null)
 
   useEffect(()=>{
     const el=canvas.current
@@ -100,7 +86,7 @@ export default function Graph({snapshot,selected,focus,reset,choose}:{
       for (const edge of edges) {
         const a=position.get(edge.from),b=position.get(edge.to)
         if (!a || !b) continue
-        const important=edge.from===selected || edge.to===selected
+        const important=selected.has(edge.from) || selected.has(edge.to)
         const color=edge.dependency?'#bc9ef0':edge.kind==='call'?'#74c7bf':'#829ca6'
         const dx=b.sx-a.sx,dy=b.sy-a.sy,len=Math.hypot(dx,dy)
         const shorten=b.radius+4
@@ -128,11 +114,9 @@ export default function Graph({snapshot,selected,focus,reset,choose}:{
       ctx.globalAlpha=1
       const labels=nodes.length<45 || (nodes.length<160 && zoom>1.65)
       for (const node of points) {
-        if (node.id===selected) continue
-        paintNode(ctx,node,labels,false)
+        const active=selected.has(node.id)
+        paintNode(ctx,node,labels || (active && selected.size<=18),active)
       }
-      const active=position.get(selected)
-      if (active) paintNode(ctx,active,true,true)
     }
     draw.current=()=>{if (!frame) frame=requestAnimationFrame(paint)}
     const observer=new ResizeObserver(draw.current)
@@ -155,15 +139,25 @@ export default function Graph({snapshot,selected,focus,reset,choose}:{
   useEffect(()=>{camera.current=initialCamera();draw.current()},[reset])
   useEffect(()=>{
     if (!focus) return
-    const node=latest.current.nodes.find(item=>item.id===latest.current.selected)
-    if (node) {
-      camera.current.target=node
-      camera.current.panX=camera.current.panY=0
-      draw.current()
+    const nodes=latest.current.nodes.filter(node=>latest.current.selected.has(node.id))
+    if (!nodes.length) return
+    const min={x:Infinity,y:Infinity,z:Infinity}, max={x:-Infinity,y:-Infinity,z:-Infinity}
+    for (const node of nodes) for (const axis of ['x','y','z'] as const) {
+      min[axis]=Math.min(min[axis],node[axis])
+      max[axis]=Math.max(max[axis],node[axis])
     }
+    const target={x:(min.x+max.x)/2,y:(min.y+max.y)/2,z:(min.z+max.z)/2}
+    const radius=Math.max(20,Math.hypot(max.x-min.x,max.y-min.y,max.z-min.z)/2)
+    const zoom=clamp(255*(950-radius)/(950*radius),.42,2.2)
+    Object.assign(camera.current,{target,zoom,panX:0,panY:0})
+    draw.current()
   },[focus])
 
-  return <canvas ref={canvas} className="graph-canvas" aria-label="Interactive 3D code graph"
+  return <canvas ref={canvas} className="graph-canvas" aria-label="Interactive 3D code graph" tabIndex={0}
+    onKeyDown={event=>{
+      const ids=latest.current.selected
+      if (event.key==='Enter' && ids.size===1) latest.current.open([...ids][0])
+    }}
     onContextMenu={event=>event.preventDefault()}
     onPointerDown={event=>{
       if (event.button!==0 && event.button!==1 && event.button!==2) return
@@ -190,28 +184,43 @@ export default function Graph({snapshot,selected,focus,reset,choose}:{
     onPointerUp={event=>{
       const drag=interaction.current
       interaction.current=null
-      if (!drag || drag.pan || Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY)>5) return
+      if (!drag || drag.pan || Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY)>5) {
+        lastClick.current=null
+        return
+      }
       const bounds=event.currentTarget.getBoundingClientRect()
       const x=event.clientX-bounds.left,y=event.clientY-bounds.top
       const points=projected.current
       for (let i=points.length-1;i>=0;i--) {
         const node=points[i]
         if (Math.hypot(node.sx-x,node.sy-y)<=node.radius+4) {
-          latest.current.choose(node.id)
-          break
+          lastClick.current=node.id
+          latest.current.choose(node.id,event.ctrlKey || event.metaKey)
+          return
         }
       }
+      lastClick.current=null
+      latest.current.choose(null,false)
+    }}
+    onDoubleClick={event=>{
+      if (!event.ctrlKey && !event.metaKey && lastClick.current) latest.current.open(lastClick.current)
     }} />
 }
 
 function paintNode(ctx:CanvasRenderingContext2D,node:Projected,label:boolean,selected:boolean) {
   ctx.beginPath()
-  ctx.arc(node.sx,node.sy,node.radius+(selected?4:0),0,Math.PI*2)
+  ctx.arc(node.sx,node.sy,node.radius,0,Math.PI*2)
   ctx.fillStyle=node.color
   ctx.fill()
   ctx.lineWidth=selected?2.5:1
   ctx.strokeStyle=selected?'#fff4ce':'#14242a'
   ctx.stroke()
+  if (selected) {
+    ctx.beginPath()
+    ctx.arc(node.sx,node.sy,node.radius+4,0,Math.PI*2)
+    ctx.lineWidth=1.5
+    ctx.stroke()
+  }
   if (label) {
     ctx.font=selected?'600 15px Geist, Segoe UI, sans-serif':'12px Geist, Segoe UI, sans-serif'
     ctx.textAlign='center'

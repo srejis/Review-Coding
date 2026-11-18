@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'react'
-import {LUNA, request} from './api'
+import {request} from './api'
 import type {Run, Snapshot} from './api'
-import {detailQuery, profileLabel} from './desktop'
+import {detailQuery, openProgress, profileLabel, startAnalysis} from './desktop'
 import type {NodeIdentity} from './desktop'
 
 const params=new URLSearchParams(location.search)
@@ -77,14 +77,8 @@ export default function Detail() {
     setBusy(true)
     setError('')
     try {
-      const profile=identity.profile ? JSON.parse(identity.profile) : {}
-      if (profile.engine && profile.engine!=='python-dependency-v3') {
-        await openManagement()
-        return
-      }
-      setRun(await request<Run>('/api/analyze',{
-        revision:identity.revision,unit:identity.unit,model:profile.model || LUNA,effort:profile.effort || 'medium'
-      }))
+      setRun(await startAnalysis(identity.revision,identity.unit))
+      await openProgress(identity.revision)
     } catch (error) {setError(String(error))}
     finally {setBusy(false)}
   }

@@ -1,4 +1,5 @@
 """Regression tests for v2 authorization, orchestration and local HTTP."""
+import asyncio
 import json
 from pathlib import Path
 import tempfile
@@ -108,6 +109,58 @@ class LocalTests(unittest.TestCase):
             with self.assertRaisesRegex(ServiceError, "invalid or expired"):
                 auth.finish(dict(state=state, error="access_denied"))
             self.assertNotIn(b"profiles", auth.path.read_bytes())
+
+    def test_analysis_progress_duplicate_start_and_scoped_cancel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            (src / "task.py").write_text("pass\n")
+            data = root / "data"
+            revision, snapshot = register(data / "review.sqlite3", src)
+            uid = next(iter(snapshot["units"]))
+            started = threading.Event()
+            auth = unittest.mock.Mock()
+            auth.status.return_value = {"active": "mock"}
+            auth.token.return_value = "mock-only"
+            provider = unittest.mock.MagicMock()
+
+            async def held_analysis(_provider, db_path, **values):
+                profile = encode({"model": values["model"], "effort": values["effort"]})
+                with database(db_path) as db:
+                    for event in ({"state": "started"}, {"state": "CONNECTING", "unit": uid}):
+                        db.execute("INSERT INTO event(snapshot,profile,data) VALUES(?,?,?)",
+                                   (revision, profile, encode(event)))
+                started.set()
+                await asyncio.Event().wait()
+
+            with patch("review_server.Responses", return_value=provider), \
+                 patch("review_server.analyze", side_effect=held_analysis), \
+                 ReviewServer(("127.0.0.1",0), Handler, data, auth) as server:
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    headers = {"X-Review-Local":"1"}
+                    with httpx.Client(base_url=server.base, trust_env=False, headers=headers) as client:
+                        self.assertIsNone(client.get("/api/run").json())
+                        payload = {"revision":revision,"model":DEFAULT_MODEL,"effort":"high"}
+                        self.assertEqual(client.post("/api/analyze",json=payload).status_code,202)
+                        self.assertTrue(started.wait(4))
+                        status = client.get("/api/run").json()
+                        self.assertEqual((status["state"],status["phase"],status["current_unit"]),
+                                         ("running","CONNECTING",uid))
+                        self.assertEqual((status["effort"],status["submitted"],status["left"]),("high",0,1))
+                        self.assertEqual(client.post("/api/analyze",json=payload).json()["code"],"active_run")
+                        self.assertEqual(client.post("/api/cancel",json={"revision":"other"}).status_code,409)
+                        self.assertEqual(client.post("/api/cancel",json={"revision":revision}).status_code,200)
+                        server.job.thread.join(4)
+                        self.assertEqual(client.get("/api/run").json()["state"],"cancelled")
+                finally:
+                    if server.job and server.job.thread.is_alive():
+                        server.job.cancel()
+                        server.job.thread.join(4)
+                    server.shutdown()
+                    worker.join()
 
     def test_legacy_reviews_and_login_redirect(self):
         with tempfile.TemporaryDirectory() as tmp:

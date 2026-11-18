@@ -9,13 +9,15 @@ export type Result = { status: string; version?:string; relations: Relation[]; b
   dependencies?:{unit:string; version:string}[]; meaning: {
   role: string; steps: { text: string; sites: string[] }[]; missing: string[]; unresolved: string[] } }
 export type Snapshot = { root: string; profiles: string[]; profile: string; units: Record<string, Unit>;
-  files: Record<string, string>; results: Record<string, Result>; issues: Record<string, string>;
+  files: Record<string, string>; file_paths?:string[]; results: Record<string, Result>; issues: Record<string, string>;
   tasks: Record<string,Task>; connections: Record<string,{relations:Relation[]}>;
   dependencies: Record<string,string[]>;
   feedback: { unit: string; time: string; category: string; note: string }[] }
 export type Account = { auth: string; problem?: string; active?: string; efforts: string[];
   accounts: {id: string; label: string}[]; models: { id: string; name: string }[] }
 export type Run = { state: string; error?: string; remaining?: number }
+export type ActiveRun = Run & {revision:string; model:string; effort:string;
+  current_unit:string|null; phase:string|null; submitted:number; left:number}
 export type Project = { id: string; root: string }
 export type Trace = { id: number; time: string; profile: Record<string,unknown>; event: { state?: string; tool?: string; unit?: string; path?:string[]; waiting?:string[]; cycle?:string[]; target?:string; version?:string } }
 

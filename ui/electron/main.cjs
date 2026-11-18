@@ -1,6 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
 const { spawn } = require('node:child_process')
 const path = require('node:path')
+const { mkdir, readFile, rename, writeFile } = require('node:fs/promises')
 const { createInterface } = require('node:readline')
 
 app.setName('Review-Coding')
@@ -147,8 +148,58 @@ ipcMain.handle('review:folder', async event => {
   const selections = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
   return selections.filePaths[0] || null
 })
+const defaults = { model: 'gpt-6-luna', effort: 'medium', compactExplorer: false }
+const efforts = new Set(['none','minimal','low','medium','high','xhigh','max','ultra'])
+let settingsQueue = Promise.resolve()
+
+function settingsPath() {
+  return path.join(process.env.REVIEW_CODING_DATA || app.getPath('userData'), 'desktop-settings.json')
+}
+
+function validPreferences(value) {
+  return value && typeof value.model === 'string' && /^[a-zA-Z0-9._:-]{1,120}$/.test(value.model)
+    && efforts.has(value.effort) && typeof value.compactExplorer === 'boolean'
+}
+
+ipcMain.handle('review:preferences', async event => {
+  trust(event, ['graph','detail','management','settings','progress'])
+  try {
+    const value = JSON.parse(await readFile(settingsPath(), 'utf8'))
+    if (!validPreferences(value)) throw new Error('Invalid desktop settings file.')
+    return value
+  } catch (error) {
+    if (error.code === 'ENOENT') return defaults
+    throw error
+  }
+})
+ipcMain.handle('review:save-preferences', async (event, value) => {
+  trust(event, ['settings'])
+  if (!validPreferences(value)) throw new Error('Invalid desktop settings.')
+  const operation = settingsQueue.then(async () => {
+    const file = settingsPath(), temp = file + '.tmp'
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(temp, JSON.stringify({ model:value.model, effort:value.effort,
+      compactExplorer:value.compactExplorer }), 'utf8')
+    await rename(temp, file)
+  })
+  settingsQueue = operation.catch(() => {})
+  await operation
+})
+ipcMain.handle('review:settings', event => {
+  trust(event, ['graph','management','detail','progress'])
+  openSecondary('settings', { mode:'settings' }, { width:630, height:690 }, 'settings')
+})
+ipcMain.handle('review:progress', async (event, revision) => {
+  trust(event, ['graph','management','detail'])
+  if (typeof revision !== 'string' || !/^[0-9a-f]{64}$/.test(revision)) {
+    throw new Error('Invalid analysis snapshot.')
+  }
+  const projects = await local('/api/projects')
+  if (!projects.some(project => project.id === revision)) throw new Error('Unknown analysis snapshot.')
+  openSecondary('progress:'+revision, {mode:'progress',revision}, { width:655, height:620 }, 'progress')
+})
 ipcMain.handle('review:login', async (event, account) => {
-  trust(event, ['management'])
+  trust(event, ['management','settings'])
   if (account !== undefined && (typeof account !== 'string' || account.length > 512)) {
     throw new Error('Invalid ChatGPT registration.')
   }

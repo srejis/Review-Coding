@@ -72,9 +72,32 @@ test('Windows Electron uses real snapshots and manages independent detail window
       await search.fill(name)
       await search.press('Enter')
     }
+    const center={x:bounds.width/2,y:bounds.height/2}
+    const selection=main.locator('.map-footer [role=status]')
+    const waitSelection=count=>selection.getByText(new RegExp('선택 '+count+'개')).waitFor()
+    await main.getByRole('button',{name:'normalize.py',exact:true}).click()
+    const fileCount=Object.values(snapshot.units).filter(unit=>unit.file===normalize.file).length
+    await waitSelection(fileCount)
+    const fileCamera=await pixels()
+    await main.getByRole('button',{name:'check_cases',exact:true}).click()
+    await waitSelection(Object.keys(snapshot.units).length)
+    await changed(fileCamera)
+    assert.equal(desktop.windows().length,1)
+    await choose('normalize')
+    await waitSelection(1)
+    await canvas.click({position:center,modifiers:['Control']})
+    await waitSelection(0)
+    await canvas.click({position:center,modifiers:['Control']})
+    await waitSelection(1)
+    await canvas.click({position:{x:5,y:5}})
+    await waitSelection(0)
+    await canvas.click({position:center})
+    await waitSelection(1)
+    assert.equal(desktop.windows().length,1)
     async function open(name) {
       const pending = desktop.waitForEvent('window')
       await choose(name)
+      await canvas.dblclick({position:center})
       const window = await pending
       await window.getByRole('heading', { name, exact: true }).waitFor()
       return window
@@ -93,6 +116,7 @@ test('Windows Electron uses real snapshots and manages independent detail window
       assert.ok(await win.locator('.evidence-line').count())
     }
     await choose('normalize')
+    await canvas.dblclick({position:center})
     await desktop.waitForEvent('window', {timeout: 500}).then(()=>{
       throw new Error('The same identity opened a duplicate window.')
     }, error=>{if (!String(error).includes('Timeout')) throw error})
@@ -111,11 +135,11 @@ test('Windows Electron uses real snapshots and manages independent detail window
     assert.equal(desktop.windows().length,2)
     await b.getByRole('heading',{name:'append_scores'}).waitFor()
 
-    // Search centered normalize. Clicking its canvas point reopens the closed window.
-    assert.equal(await main.locator('.map-selection strong').textContent(),'normalize')
+    // Search centered normalize. A double click reopens the closed window.
+    await waitSelection(1)
     const preserved = await pixels()
     const reopened = desktop.waitForEvent('window')
-    await canvas.click({position:{x:bounds.width/2,y:bounds.height/2}})
+    await canvas.dblclick({position:center})
     const again = await reopened
     await again.getByRole('heading', {name:'normalize', exact:true}).waitFor()
     assert.equal(await pixels(),preserved)
@@ -135,10 +159,48 @@ test('Windows Electron uses real snapshots and manages independent detail window
     const differentProject = projects.find(candidate => candidate.id !== project.id)
     if (differentProject) {
       await main.getByRole('combobox', {name:'프로젝트·스냅샷'}).selectOption(differentProject.id)
-      await main.waitForFunction(() => document.querySelector('.map-selection') === null)
+      await waitSelection(0)
       assert.equal(new URL(again.url()).searchParams.get('revision'),project.id)
       assert.equal(await again.locator('.detail-role').textContent(),normalizeData.results[normalize.id].meaning.role)
       await main.getByRole('combobox', {name:'프로젝트·스냅샷'}).selectOption(project.id)
+      await select.waitFor()
+    }
+
+    const dense = projects.find(candidate => path.basename(candidate.root) === '97_rembg')
+    if (dense) {
+      await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(dense.id)
+      const denseGraph = await fetch(origin+'/api/snapshot?'+new URLSearchParams({
+        revision:dense.id,view:'graph'
+      })).then(response=>response.json())
+      const all = Object.values(denseGraph.units)
+      const folder = all.find(unit=>unit.file.includes('/'))?.file.split('/')[0]
+      assert.ok(folder && all.length>=170)
+      const {treeCoordinates}=await import('../src/treeLayout.ts')
+      const positions=treeCoordinates(all)
+      const reversed=treeCoordinates([...all].reverse())
+      for (const [id,point] of positions) assert.deepEqual(point,reversed.get(id))
+      const [originPoint,...rest]=positions.values()
+      const vectors=rest.map(p=>[p.x-originPoint.x,p.y-originPoint.y,p.z-originPoint.z])
+      const first=vectors.find(v=>Math.hypot(...v)>0)
+      const cross=v=>[first[1]*v[2]-first[2]*v[1],first[2]*v[0]-first[0]*v[2],first[0]*v[1]-first[1]*v[0]]
+      const normal=vectors.map(cross).find(v=>Math.hypot(...v)>0)
+      assert.ok(normal && vectors.some(v=>Math.abs(v.reduce((sum,n,i)=>sum+n*normal[i],0))>1e-4),
+        'The saved rembg units occupy a genuinely non-coplanar layout.')
+      const explorer=main.getByRole('complementary',{name:'파일 탐색기'})
+      await explorer.getByRole('button',{name:folder,exact:true}).waitFor()
+      const denseBefore=await pixels()
+      await explorer.getByRole('button',{name:folder,exact:true}).click()
+      const count=all.filter(unit=>unit.file.split('/')[0]===folder).length
+      await waitSelection(count)
+      await changed(denseBefore)
+      await explorer.getByRole('button',{name:folder+' 폴더 펼치기·접기'}).click()
+      const choice = all.find(unit=>unit.file.split('/')[0]===folder)
+      await explorer.getByRole('searchbox',{name:'파일·폴더 검색'}).fill(choice.file)
+      await explorer.locator('button[title]').filter({hasText:path.basename(choice.file)}).last().click()
+      await waitSelection(all.filter(unit=>unit.file===choice.file).length)
+      assert.equal(await main.locator('.map-selection').count(),0)
+      if (screenshot) await main.screenshot({path:path.join(screenshot,'review-coding-rembg-tree.png')})
+      await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(project.id)
       await select.waitFor()
     }
 
@@ -148,12 +210,35 @@ test('Windows Electron uses real snapshots and manages independent detail window
       await b.screenshot({path:path.join(screenshot,'review-coding-meaning.png'),fullPage:true})
     }
     const management=desktop.waitForEvent('window')
-    await main.getByRole('button',{name:'분석·검수 관리'}).click()
+    await main.getByRole('button',{name:'검수·이력 및 내보내기'}).click()
     const control=await management
     await control.getByRole('button',{name:'분석·재개'}).waitFor()
-    assert.equal(await control.getByRole('combobox',{name:'모델',exact:true}).inputValue(),'gpt-6-luna')
-    assert.equal(await control.getByRole('combobox',{name:'추론',exact:true}).inputValue(),'medium')
+    assert.equal(await control.getByRole('combobox',{name:'모델',exact:true}).count(),0)
     await control.getByRole('link',{name:'JSON 내보내기'}).waitFor()
+
+    const settingsPromise=desktop.waitForEvent('window')
+    await main.getByRole('button',{name:'설정',exact:true}).click()
+    const settings=await settingsPromise
+    await settings.getByRole('button',{name:'모델',exact:true}).click()
+    await settings.getByRole('button',{name:'설정 저장'}).waitFor()
+    assert.equal(await settings.getByRole('combobox',{name:'기본 모델'}).inputValue(),'gpt-6-luna')
+    assert.equal(await settings.getByRole('combobox',{name:'추론 노력'}).inputValue(),'medium')
+    // The test data folder has a DB copy and no credentials. Exercise the real HTTP flow without purchasing inference.
+    if (process.env.REVIEW_CODING_TEST_ANALYZE === 'signed-out') {
+      await settings.getByRole('combobox',{name:'추론 노력'}).selectOption('high')
+      await settings.getByRole('button',{name:'설정 저장'}).click()
+      await settings.getByText('저장했습니다.',{exact:false}).waitFor()
+      await settings.close()
+      const progressPromise=desktop.waitForEvent('window')
+      await main.getByRole('button',{name:'분석 시작',exact:true}).click()
+      const progress=await progressPromise
+      await progress.getByText('분석 실패',{exact:true}).waitFor()
+      assert.match(await progress.getByRole('alert').textContent(),/ChatGPT/)
+      const run=await fetch(origin+'/api/run').then(response=>response.json())
+      assert.equal(run.model,'gpt-6-luna')
+      assert.equal(run.effort,'high')
+      assert.equal(run.revision,project.id)
+    }
 
     const end=once(desktop.process(),'exit')
     await main.close().catch(()=>{})

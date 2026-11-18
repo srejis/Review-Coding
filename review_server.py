@@ -38,8 +38,9 @@ async def account_models(auth):
 
 
 class Job:
-    def __init__(self, path, auth, values):
+    def __init__(self, path, auth, values, cursor, total):
         self.path, self.auth, self.values = path, auth, values
+        self.cursor, self.total = cursor, total
         self.lock = threading.Lock()
         self.summary = {"state": "running"}
         self.loop = self.task = None
@@ -170,6 +171,8 @@ class Handler(BaseHTTPRequestHandler):
             self.snapshot(db_path, query)
         elif path == "/api/export":
             self.json(export(db_path, query["revision"]))
+        elif path == "/api/run":
+            self.json(self.run_status(db_path))
         elif path == "/api/events":
             self.events(query["revision"], int(query.get("after", "0")))
         elif path.startswith("/api/"):
@@ -225,7 +228,29 @@ class Handler(BaseHTTPRequestHandler):
         self.json(dict(root=root, profiles=profiles, profile=profile, units=units,
                        results=results, tasks=tasks, connections=connections, dependencies=dependencies,
                        feedback=feedback, issues=snap["issues"],
+                       file_paths=sorted(files if view != "graph" else snap["files"]),
                        files={name: file["source"] for name, file in files.items()}))
+
+    def run_status(self, db_path):
+        job = self.server.job
+        if not job:
+            return None
+        revision = job.values["revision"]
+        with database(db_path) as db:
+            row = db.execute(
+                "SELECT profile FROM event WHERE snapshot=? AND rowid>? AND json_extract(data,'$.state')='started' ORDER BY rowid DESC LIMIT 1",
+                (revision, job.cursor)).fetchone()
+            profile = row[0] if row else None
+            count = db.execute(
+                "SELECT COUNT(*) FROM analysis_task WHERE snapshot=? AND profile=? AND state IN ('SEMANTIC_SUBMITTED','SEMANTIC_PARTIAL','QUALITY_VERIFIED')",
+                (revision, profile)).fetchone()[0]
+            phase = db.execute(
+                "SELECT data FROM event WHERE snapshot=? AND profile=? AND rowid>? AND json_extract(data,'$.state') IN ('CONNECTING','SEMANTICIZING') ORDER BY rowid DESC LIMIT 1",
+                (revision, profile, job.cursor)).fetchone()
+        current = json.loads(phase[0]) if phase and job.summary["state"] == "running" else {}
+        return dict(job.summary, revision=revision, model=job.values["model"], effort=job.values["effort"],
+                    current_unit=current.get("unit"), phase=current.get("state"),
+                    submitted=count, left=max(0,job.total-count))
 
     def events(self, revision, after):
         self.send_response(200)
@@ -264,17 +289,20 @@ class Handler(BaseHTTPRequestHandler):
                           effort=data.get("effort", DEFAULT_EFFORT), only=data.get("unit"))
             with database(db_path) as db:
                 _, snap = load_snapshot(db, values["revision"])
+                cursor = db.execute("SELECT COALESCE(MAX(rowid),0) FROM event").fetchone()[0]
                 if values["only"] is not None and values["only"] not in snap["units"]:
                     raise ValueError("Unknown unit.")
             with self.server.lock:
                 if self.server.job and self.server.job.thread.is_alive():
                     raise ServiceError("active_run", "An analysis is already running.")
-                self.server.job = Job(db_path, self.server.auth, values)
+                self.server.job = Job(db_path, self.server.auth, values, cursor, len(snap["units"]))
                 self.server.job.thread.start()
             self.json({"state": "running"}, 202)
         elif path == "/api/cancel":
             with self.server.lock:
                 if self.server.job and self.server.job.thread.is_alive():
+                    if data.get("revision") and self.server.job.values["revision"] != data["revision"]:
+                        raise ServiceError("active_run", "That project no longer owns the active analysis.")
                     self.server.job.cancel()
             self.json({"state": "cancellation_requested"})
         elif path == "/api/verify":
