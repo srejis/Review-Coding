@@ -150,8 +150,9 @@ ipcMain.handle('review:manage', async (event, value) => {
     { ...identity, mode: 'management' }, { width: 1380, height: 880 }, 'management')
 })
 ipcMain.handle('review:folder', async event => {
-  trust(event, ['graph'])
-  const selections = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
+  trust(event, ['projects'])
+  const selections = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender),
+    { properties: ['openDirectory'] })
   return selections.filePaths[0] || null
 })
 const defaults = { model: 'gpt-6-luna', effort: 'medium', compactExplorer: false, theme: 'editorial' }
@@ -255,14 +256,50 @@ ipcMain.handle('review:settings', event => {
   trust(event, ['graph','management','detail','progress'])
   openSecondary('settings', { mode:'settings' }, { width:630, height:690 }, 'settings')
 })
-ipcMain.handle('review:progress', async (event, revision) => {
+ipcMain.handle('review:progress', async (event, revision, profile = '', unit = '') => {
   trust(event, ['graph','management','detail'])
-  if (typeof revision !== 'string' || !/^[0-9a-f]{64}$/.test(revision)) {
+  if (typeof revision !== 'string' || !/^[0-9a-f]{64}$/.test(revision) ||
+      typeof profile !== 'string' || profile.length > 4096 || typeof unit !== 'string' || unit.length > 4096) {
     throw new Error('Invalid analysis snapshot.')
   }
   const projects = await local('/api/projects')
   if (!projects.some(project => project.id === revision)) throw new Error('Unknown analysis snapshot.')
-  openSecondary('progress:'+revision, {mode:'progress',revision}, { width:655, height:620 }, 'progress')
+  openSecondary('progress:'+JSON.stringify([revision,profile,unit]), {mode:'progress',revision,profile,unit},
+    { width:760, height:720 }, 'progress')
+})
+ipcMain.handle('review:projects', event => {
+  trust(event, ['graph'])
+  openSecondary('projects', {mode:'projects'}, {width:810, height:790}, 'projects')
+})
+ipcMain.handle('review:focus-graph', event => {
+  trust(event, ['projects'])
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
+ipcMain.handle('review:delete-project', async (event, project) => {
+  trust(event, ['projects'])
+  if (typeof project !== 'string' || !/^[0-9a-f]{64}$/.test(project)) throw new Error('Invalid project.')
+  const result = await local('/api/delete-project', {project})
+  for (const window of secondary.values()) {
+    if (!window.isDestroyed() && permittedPage(window.webContents.getURL())) {
+      const revision = new URL(window.webContents.getURL()).searchParams.get('revision')
+      if (result.revisions.includes(revision)) window.close()
+    }
+  }
+  return result
+})
+ipcMain.handle('review:analysis-review', async (event, value) => {
+  trust(event, ['progress'])
+  if (!value || !/^[0-9a-f]{64}$/.test(value.revision) ||
+      typeof value.profile !== 'string' || value.profile.length > 4096) throw new Error('Invalid analysis.')
+  const {revision,profile,unit} = value
+  if (unit) {
+    const status = await local('/api/analysis?' + new URLSearchParams({revision,profile}))
+    await verifyIdentity({root:status.root,revision,profile,unit})
+  }
+  openSecondary('analysis-review:'+JSON.stringify([revision,profile,unit]),
+    {mode:'management',revision,profile,unit:unit || ''}, {width:1380,height:880}, 'management')
 })
 ipcMain.handle('review:login', async (event, account) => {
   trust(event, ['management','settings'])

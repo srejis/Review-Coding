@@ -26,6 +26,24 @@
 .map-stage { position:relative; flex:1; min-height:0; background:var(--stage); }
 .graph-canvas { display:block; width:100%; height:100%; cursor:grab; touch-action:none; }
 .graph-canvas:active { cursor:grabbing; }
+.icon-button { min-width:36px; min-height:34px; padding:3px 8px; font-size:17px; line-height:1; }
+.map-reset { position:absolute; top:16px; right:18px; z-index:1; color:var(--stage-bright); background:var(--legend); border-color:var(--stage-line); }
+.manager-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+.manager-heading h1,.manager-heading h2,.manager-heading p { margin:0 0 7px; }
+.manager-heading button { flex-shrink:0; }
+.manager-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.project-path,.progress-project { overflow-wrap:anywhere; }
+.project-card summary,.analysis-issue summary { cursor:pointer; }
+.code-history,.analysis-issue { border-top:1px solid var(--line); padding:12px 0; margin-top:9px; }
+.history-row { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:10px 0; }
+.history-row p { margin:3px 0; }
+.history-row pre,.code-history code { overflow-wrap:anywhere; white-space:pre-wrap; }
+.delete-confirm { position:sticky; bottom:12px; box-shadow:0 8px 30px #0003; }
+.danger-button { color:var(--error); }
+.analysis-counts { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+.analysis-counts div { padding:8px 10px; border:1px solid var(--line); border-radius:7px; }
+.analysis-counts dt { color:var(--muted); }
+.analysis-counts dd { margin:3px 0 0; font-size:20px; font-variant-numeric:tabular-nums; }
 .map-empty { position:absolute; inset:0; display:grid; place-items:center; color:var(--stage-ink); pointer-events:none; }
 .map-legend { position:absolute; background:var(--legend); border:1px solid var(--stage-line); border-radius:8px; pointer-events:none; }
 .map-legend { right:20px; bottom:16px; display:grid; grid-template-columns:repeat(2,max-content); gap:6px 16px; padding:10px 13px; }

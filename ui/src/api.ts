@@ -26,8 +26,19 @@ export type Account = { auth: string; problem?: string; active?: string; efforts
   accounts: {id: string; label: string}[]; models: { id: string; name: string }[] }
 export type Run = { state: string; error?: string; remaining?: number }
 export type ActiveRun = Run & {revision:string; model:string; effort:string;
-  current_unit:string|null; phase:string|null; submitted:number; left:number}
+  current_unit:string|null; current_name?:string; phase:string|null; submitted:number; left:number;
+  attempt?:number; profile?:string}
 export type Project = { id: string; root: string }
+export type QualityCounts={total:number; complete:number; partial:number; failed:number; unprocessed:number}
+export type ProfileHistory={id:string; time:string|null; counts:QualityCounts}
+export type CodeHistory={id:string; registered:string|null; last:string|null; changed:number|null;
+  count:number; parse_errors:number; profiles:ProfileHistory[]; default_profile:string}
+export type ProjectRecord=Project & {name:string; latest:string; last:string|null; snapshots:CodeHistory[]}
+export type AnalysisReason={code:string; detail?:string; details?:string[]; unit?:string; units?:string[]; sites?:string[]}
+export type AnalysisStatus={root:string; profile:string; state:string; counts:QualityCounts; issues:Record<string,string>;
+  outstanding:{unit:string;name:string;file:string;line:number;state:string;reasons:AnalysisReason[];
+    retries:{attempt:number;phase:string;reasons:AnalysisReason[]}[]}[];
+  live:ActiveRun|null; retries:number; error?:string; other_running:boolean; repairable:boolean; resumable:boolean}
 export type Trace = { id: number; time: string; profile: Record<string,unknown>; event: { state?: string; tool?: string; unit?: string; path?:string[]; waiting?:string[]; cycle?:string[]; target?:string; version?:string } }
 
 export async function request<T>(path: string, payload?: object): Promise<T> {

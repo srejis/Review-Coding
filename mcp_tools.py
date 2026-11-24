@@ -56,12 +56,13 @@ PHASE_TOOLS = {
 
 
 class AnalysisTools:
-    def __init__(self, path, revision, profile, uid, phase, dependencies=None, meaning_inputs=None):
+    def __init__(self, path, revision, profile, uid, phase, dependencies=None, meaning_inputs=None, *, recover=False):
         self.path, self.revision, self.profile, self.uid = path, revision, profile, uid
         with database(path) as db:
             _, self.snapshot = load_snapshot(db, revision)
         self.units = self.snapshot["units"]
         self.phase = phase
+        self.recover = recover
         self.dependencies = set(dependencies or ())
         self.meaning_inputs = meaning_inputs or {}
         self.read = {}
@@ -166,6 +167,14 @@ class AnalysisTools:
         if name == "submit_relations":
             relations = args["relations"]
             validate_relations(self.units, relations)
+            if self.recover:
+                facts = SourceRelations(self.units, self.snapshot["files"])
+                owner = self.units[self.uid].get("partition_parent", self.uid)
+                for edge in relations:
+                    if edge["kind"] == "call" and edge["certainty"] == "confirmed" and (
+                            facts.call_owner(self.uid, edge["evidence"]) != owner):
+                        raise ValueError(f"Confirmed call to {edge['target']} needs a call expression "
+                                         f"owned by {self.uid}; cited {encode(edge['evidence'])}.")
             inheritance = [edge for edge in relations if edge["kind"] == "inheritance"]
             if inheritance:
                 facts = SourceRelations(self.units, self.snapshot["files"])
@@ -175,13 +184,13 @@ class AnalysisTools:
                         raise ValueError("Cite the assigned subclass's explicit base expression. "
                                          "A confirmed base must resolve to the submitted class.")
             for relation in relations:
-                if any(ref["line"] not in self.read.get(ref["unit"], set())
-                       for ref in relation["evidence"]):
-                    raise ValueError("Read the cited source before submitting evidence.")
+                unread = [ref for ref in relation["evidence"] if ref["line"] not in self.read.get(ref["unit"], ())]
+                if unread:
+                    raise ValueError("Read the cited source before submitting evidence: " + encode(unread))
                 if relation["certainty"] == "confirmed" and (
                     relation["target"] not in self.read or not any(ref["unit"] == self.uid for ref in relation["evidence"])
                 ):
-                    raise ValueError("Read the target and cite evidence in the assigned unit before confirming.")
+                    raise ValueError(f"Read target {relation['target']} and cite evidence in {self.uid} before confirming.")
             confirmed = {edge["target"] for edge in relations if edge["certainty"] == "confirmed"}
             if not set(args["dependencies"]) <= confirmed:
                 raise ValueError("Each meaning dependency must be an exact confirmed local target.")
@@ -190,18 +199,20 @@ class AnalysisTools:
         if name == "submit_meaning":
             unit = self.units[self.uid]
             blocks = split_blocks(self.units, self.uid)
-            if any(block["id"] not in self.meanings_read for block in blocks):
-                raise ValueError("Read every prepared block meaning before composing its parent.")
+            pending = [block["id"] for block in blocks if block["id"] not in self.meanings_read]
+            if pending:
+                raise ValueError("Read every prepared block meaning before composing its parent: " + encode(pending))
             meaning = validate_meaning(unit, **args, units=self.units, block_meanings=self.meaning_inputs)
             owners = {site["id"]: (owner["id"], site["line"])
                       for owner in [unit, *blocks] for site in owner["sites"]}
             parent_lines = self.read[self.uid] if blocks else set()
-            if any(owners[site][1] not in parent_lines and
-                   owners[site][1] not in self.read.get(owners[site][0], ())
-                   for step in meaning["steps"] for site in step["sites"]):
-                raise ValueError("Read the cited source before submitting meaning.")
+            unread = {site: owners[site] for step in meaning["steps"] for site in step["sites"]
+                      if owners[site][1] not in parent_lines and owners[site][1] not in self.read.get(owners[site][0], ())}
+            if unread:
+                raise ValueError("Read the cited source before submitting meaning: " + encode(unread))
             if meaning["missing"] and not meaning["unresolved"]:
-                raise ValueError("Cover every owned site or explain unresolved coverage.")
+                raise ValueError("Cover every owned site or explain unresolved coverage: " +
+                                 encode({site: owners[site] for site in meaning["missing"]}))
             self.staged["meaning"] = meaning
         if name == "revisit_connection":
             target = args["target"]
@@ -225,6 +236,17 @@ class AnalysisTools:
                  if start <= site["line"] <= end}
         effects = []
         for node in ast.walk(self.trees[file]):
+            if self.recover and isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+                site = sites.get((node.lineno, node.col_offset))
+                if site is not None:
+                    eager = [ast.unparse(call.func) for call in ast.walk(node.value)
+                             if isinstance(call, ast.Call) and any(isinstance(expr, ast.Call)
+                                 for expr in [*call.args, *(keyword.value for keyword in call.keywords)])]
+                    if eager:
+                        effects.append(dict(site=site, facts=[
+                            "On normal execution these calls evaluate nested arguments before invocation, "
+                            "even if an argument is used only as a fallback: " + ", ".join(eager)
+                        ]))
             if unit["kind"] == "block" and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 first = node.body[0]
                 if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):

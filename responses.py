@@ -21,12 +21,18 @@ def provider_error(body, status=None):
 
 
 class Responses:
-    def __init__(self, access_token, transport=None):
+    def __init__(self, access_token, transport=None, *, refresh=None):
+        self.refresh = refresh
         self.client = httpx.AsyncClient(base_url=RESOURCE, transport=transport,
                                         headers={"Authorization": f"Bearer {access_token}"}, trust_env=transport is None,
                                         timeout=httpx.Timeout(55, connect=15))
 
+    async def refresh_session(self):
+        if self.refresh:
+            self.client.headers["Authorization"] = f"Bearer {await self.refresh()}"
+
     async def models(self):
+        await self.refresh_session()
         response = await self.client.get("models")
         if not response.is_success:
             try:
@@ -39,6 +45,7 @@ class Responses:
                 for row in response.json()["models"] if row.get("visibility") == "list"]
 
     async def generate(self, model, effort, instructions, messages, tools):
+        await self.refresh_session()
         payload = dict(model=model, reasoning={"effort": effort}, instructions=instructions,
                        input=messages, tools=tools, tool_choice="required",
                        parallel_tool_calls=False, store=False, stream=True,

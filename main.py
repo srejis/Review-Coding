@@ -25,6 +25,8 @@ def register(db_path, root):
                               (revision, root, encode(data)))
         if inserted.rowcount:
             inherit(db, revision, root, data)
+        db.execute("INSERT OR REPLACE INTO snapshot_history(snapshot,registered) "
+                   "VALUES(?,CURRENT_TIMESTAMP)", (revision,))
     return revision, data
 
 
@@ -48,6 +50,13 @@ def export(db_path, revision):
             events=[dict(profile=json.loads(profile), time=time, event=json.loads(data))
                     for profile, time, data in db.execute(
                         "SELECT profile,time,data FROM event WHERE snapshot=? ORDER BY rowid", (revision,))],
+            retries=[dict(profile=json.loads(profile), unit=uid, attempt=attempt, phase=phase, **json.loads(data))
+                     for profile, uid, attempt, phase, data in db.execute(
+                         "SELECT profile,unit,attempt,phase,data FROM analysis_retry WHERE snapshot=?", (revision,))],
+            runs=[dict(profile=json.loads(profile), time=time, **{
+                key: value for key, value in json.loads(data).items() if key != "profile"})
+                  for profile, time, data in db.execute(
+                      "SELECT profile,time,data FROM analysis_run WHERE snapshot=?", (revision,))],
             feedback=[dict(profile=json.loads(profile), unit=uid, time=time, **json.loads(data))
                       for profile, uid, time, data in db.execute(
                           "SELECT profile,unit,time,data FROM feedback WHERE snapshot=?", (revision,))])
@@ -56,14 +65,19 @@ def export(db_path, revision):
 async def run_cancellable(operation, stop_file):
     if stop_file is None:
         return await operation
-    async with asyncio.TaskGroup() as group:
-        task = group.create_task(operation)
+    task = asyncio.create_task(operation)
+    try:
         while not task.done():
             if stop_file.exists():
                 task.cancel()
-                break
+                await asyncio.gather(task, return_exceptions=True)
+                return {"state": "cancelled"} if task.cancelled() else task.result()
             await asyncio.sleep(0.5)
-    return {"state": "cancelled"} if task.cancelled() else task.result()
+        return {"state": "cancelled"} if task.cancelled() else task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def main():
@@ -78,6 +92,8 @@ def main():
     run.add_argument("snapshot")
     run.add_argument("--unit", help="Analyze one selected unit ID.")
     run.add_argument("--full", action="store_true", help="Process all units continuously, preserving per-unit safety limits.")
+    run.add_argument("--recover", action="store_true", help="Analyze and repair retryable results with saved limits.")
+    run.add_argument("--previous-profile", type=Path, help="Read a saved source or recovery profile from a JSON file.")
     run.add_argument("--model")
     run.add_argument("--effort")
     run.add_argument("--limit", type=int, default=12, choices=range(1, 101), metavar="1..100")
@@ -89,6 +105,8 @@ def main():
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
+    if args.command == "analyze" and args.previous_profile and not args.recover:
+        parser.error("--previous-profile requires --recover")
     data = args.data.resolve()
     db_path = data / "review.sqlite3"
     from agent import analyze
@@ -99,11 +117,17 @@ def main():
     auth = ChatGPTAuth(data / "chatgpt")
 
     async def run_analysis():
-        token = await asyncio.to_thread(auth.token)
-        provider = Responses(token)
+        account = (await asyncio.to_thread(auth.status)).get("active")
+
+        async def refresh():
+            return await asyncio.to_thread(auth.token, account)
+
+        provider = Responses(await refresh(), refresh=refresh)
         async with provider.client:
             return await analyze(provider, db_path, args.snapshot, args.model or DEFAULT_MODEL,
-                                 args.effort or DEFAULT_EFFORT, args.limit, args.seconds, args.unit, full=args.full)
+                                 args.effort or DEFAULT_EFFORT, args.limit, args.seconds, args.unit, full=args.full,
+                                 recover=args.recover, previous=encode(json.loads(args.previous_profile.read_text(
+                                     encoding="utf-8-sig"))) if args.previous_profile else None)
     try:
         match args.command:
             case "status":

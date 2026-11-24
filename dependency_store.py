@@ -2,7 +2,7 @@
 import json
 
 from source import (database, digest, encode, load_snapshot, split_blocks,
-                    composition_refs, composition_current, validate_meaning)
+                    composition_refs, composition_current, validate_meaning, validate_relations)
 
 TERMINAL = {"SEMANTIC_SUBMITTED", "SEMANTIC_PARTIAL", "QUALITY_VERIFIED"}
 FAILURES = {"FAILED", "BLOCKED_DEPENDENCY"}
@@ -68,7 +68,7 @@ class Checkpoints:
                             previous["reads"])
             set_state(db, self.revision, self.profile, uid, "NEW", {"revisit": target})
 
-    def semanticize(self, uid, meaning, connections, refs, boundaries, reads):
+    def semanticize(self, uid, meaning, connections, refs, boundaries, reads, *, recover=False):
         key = (self.revision, self.profile)
         with database(self.path) as db:
             # Keep version validation and the parent commit in the same write transaction.
@@ -86,7 +86,8 @@ class Checkpoints:
             partial_blocks = any(results[block["id"]]["status"] != "submitted" or
                                  results[block["id"]]["meaning"]["missing"] or
                                  results[block["id"]]["meaning"]["unresolved"] for block in blocks)
-            status = "partial" if meaning["missing"] or meaning["unresolved"] or boundaries or partial_blocks else "submitted"
+            blocking = [edge for edge in boundaries if not recover or edge["kind"] != "external"]
+            status = "partial" if meaning["missing"] or meaning["unresolved"] or blocking or partial_blocks else "submitted"
             result = dict(status=status, relations=connections["relations"], meaning=meaning,
                           dependencies=refs, boundaries=boundaries, reads=sorted(reads))
             result["version"] = digest(encode(result).encode())
@@ -101,6 +102,80 @@ class Checkpoints:
             db.execute("INSERT OR REPLACE INTO result VALUES(?,?,?,?)", (*key, uid, encode(result)))
             set_state(db, *key, uid, "SEMANTIC_PARTIAL" if status == "partial" else "SEMANTIC_SUBMITTED")
         return result
+
+    def recovery_state(self):
+        with database(self.path) as db:
+            key = self.revision, self.profile
+            metadata = {uid: json.loads(raw) for uid, raw in db.execute(
+                "SELECT unit,metadata FROM analysis_task WHERE snapshot=? AND profile=?", key)}
+            history = {}
+            for uid, attempt, phase, signature, raw in db.execute(
+                "SELECT unit,attempt,phase,signature,data FROM analysis_retry WHERE snapshot=? AND profile=? "
+                "ORDER BY unit,attempt", key):
+                history.setdefault(uid, []).append(dict(attempt=attempt, phase=phase,
+                                                       signature=signature, **json.loads(raw)))
+        return metadata, history
+
+    def queue_retry(self, uid, phase, signature, reasons, attempt):
+        with database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO analysis_retry VALUES(?,?,?,?,?,?,?)",
+                       (self.revision, self.profile, uid, attempt, phase, signature, encode(dict(reasons=reasons))))
+            set_state(db, self.revision, self.profile, uid,
+                      "NEW" if phase == "connection" else "WAITING_DEPENDENCIES",
+                      {"repair": reasons, "attempt": attempt})
+
+    def seed_recovery(self, previous):
+        """Revalidate checkpoints from this exact snapshot into a separate profile."""
+        key = self.revision, self.profile
+        with database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM analysis_task WHERE snapshot=? AND profile=? LIMIT 1", key).fetchone():
+                return
+            states, connections, deps, results = read_state(db, self.revision, previous)
+            if not states and not results:
+                raise ValueError("The selected profile has no analysis checkpoints.")
+            _, snap = load_snapshot(db, self.revision)
+            units = snap["units"]
+            metadata = {uid: json.loads(raw) for uid, raw in db.execute(
+                "SELECT unit,metadata FROM analysis_task WHERE snapshot=? AND profile=?", (self.revision, previous))}
+            invalid_connections = set()
+            for uid, conn in connections.items():
+                try:
+                    validate_relations(units, conn["relations"])
+                    if any(target not in units for target in deps[uid]):
+                        raise ValueError("Unknown dependency")
+                except (ValueError, KeyError, TypeError):
+                    invalid_connections.add(uid)
+            invalid = invalid_connections.copy()
+            for uid, saved in results.items():
+                try:
+                    unit, meaning = units[uid], saved["meaning"]
+                    validate_relations(units, saved["relations"])
+                    verified = validate_meaning(unit, meaning["role"], meaning["steps"],
+                                                meaning["unresolved"], units=units, block_meanings=results)
+                    if uid not in connections or saved["status"] not in {"submitted", "partial"} or (
+                        verified["missing"] != meaning["missing"] or not composition_current(unit, units, results)
+                        or any(results[ref["unit"]]["version"] != ref["version"]
+                               for ref in saved.get("dependencies", ()))
+                    ):
+                        invalid.add(uid)
+                except (ValueError, KeyError, TypeError):
+                    invalid.add(uid)
+            affected = ancestors(deps, invalid)
+            for uid in (states.keys() | results.keys()) & units.keys():
+                state = states.get(uid, "NEW")
+                if uid in connections and uid not in invalid_connections:
+                    blocks = {b["id"] for b in split_blocks(units, uid)}
+                    save_connection(db, *key, uid, dict(connections[uid], dependencies=[
+                        target for target in deps[uid] if target not in blocks]), connections[uid]["reads"])
+                if uid in results and uid not in affected:
+                    db.execute("INSERT INTO result VALUES(?,?,?,?)", (*key, uid, encode(results[uid])))
+                if uid in affected or state not in TERMINAL | FAILURES:
+                    state = "WAITING_DEPENDENCIES" if uid in connections and uid not in invalid_connections else "NEW"
+                elif state == "QUALITY_VERIFIED":
+                    state = "SEMANTIC_SUBMITTED"
+                set_state(db, *key, uid, state, {**metadata.get(uid, {}), "seeded": True})
 
 
 def set_state(db, revision, profile, uid, state, metadata=None):

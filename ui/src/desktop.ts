@@ -8,6 +8,9 @@ import type {LayoutCache} from './incrementalLayout'
 export type NodeIdentity = { root: string; revision: string; profile: string; unit: string }
 export type LayoutScope = {root:string; revision:string; profile:string; version:string}
 export type Preferences = {model:string; effort:string; compactExplorer:boolean; theme:Theme}
+export type ProjectSelection={project:string; revision?:string; profile?:string}
+export const projectSelectionKey='review-coding-project'
+export const projectChangeKey='review-coding-project-change'
 export const defaults:Preferences={model:LUNA,effort:'medium',compactExplorer:false,theme:'editorial'}
 const storageKey='review-coding-preferences'
 const changeEvent='review-preferences-changed'
@@ -20,7 +23,11 @@ declare global {
       pickFolder: ()=>Promise<string|null>
       login: (account?:string)=>Promise<void>
       openSettings: ()=>Promise<void>
-      openProgress: (revision:string)=>Promise<void>
+      openProgress: (revision:string,profile?:string,unit?:string)=>Promise<void>
+      openProjects: ()=>Promise<void>
+      focusGraph: ()=>Promise<void>
+      deleteProject: (project:string)=>Promise<{revisions:string[]}>
+      openReview: (value:{revision:string;profile:string;unit?:string})=>Promise<void>
       preferences: ()=>Promise<Preferences>
       onPreferences: (listener:(value:Preferences)=>void)=>()=>void
       savePreferences: (value:Preferences)=>Promise<void>
@@ -36,7 +43,30 @@ export function detailQuery(identity:NodeIdentity) {
 
 export function profileLabel(raw:string) {
   const profile=JSON.parse(raw)
-  return [profile.model, profile.effort, profile.prompt_hash?.slice(0,8)].filter(Boolean).join(' · ')
+  return [profile.model, profile.effort, profile.recovery ? '보완 분석' : null].filter(Boolean).join(' · ')
+}
+
+export function readProjectSelection():ProjectSelection|null {
+  try {return JSON.parse(localStorage.getItem(projectSelectionKey) || 'null')}
+  catch {return null}
+}
+
+export function chooseProject(selection:ProjectSelection) {
+  localStorage.setItem(projectSelectionKey,JSON.stringify(selection))
+  signalProjectChange()
+}
+
+export function signalProjectChange() {
+  localStorage.setItem(projectChangeKey,String(Date.now()))
+}
+
+export function formatDate(value:string|null) {
+  return value ? new Date(value.replace(' ','T')+'Z').toLocaleString('ko-KR') : '기록 없음'
+}
+
+export async function openProjects() {
+  if (window.reviewDesktop) await window.reviewDesktop.openProjects()
+  else window.open('/?mode=projects','_blank','noopener')
 }
 
 export async function readPreferences():Promise<Preferences> {
@@ -94,12 +124,14 @@ export async function openSettings() {
   else window.open('/?mode=settings','_blank','noopener')
 }
 
-export async function openProgress(revision:string) {
-  if (window.reviewDesktop) await window.reviewDesktop.openProgress(revision)
-  else window.open('/?'+new URLSearchParams({mode:'progress',revision}),'_blank','noopener')
+export async function openProgress(revision:string,profile?:string,unit?:string) {
+  if (window.reviewDesktop) await window.reviewDesktop.openProgress(revision,profile,unit)
+  else window.open('/?'+new URLSearchParams({mode:'progress',revision,profile:profile || '',unit:unit || ''}),'_blank','noopener')
 }
 
-export async function startAnalysis(revision:string, unit?:string) {
-  const {model,effort}=await readPreferences()
-  return request<Run>('/api/analyze',{revision,unit,model,effort})
+export async function startAnalysis(revision:string, unit?:string, previous?:string) {
+  const {model,effort}=previous ? JSON.parse(previous) as Preferences : await readPreferences()
+  const run=await request<Run>('/api/analyze',{revision,unit,model,effort,previous})
+  signalProjectChange()
+  return run
 }

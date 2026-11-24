@@ -1,7 +1,7 @@
 import {useMemo,useEffect, useRef, useState} from 'react'
 import {request,meaningSites} from './api'
 import type {Run, Snapshot} from './api'
-import {detailQuery, openProgress, profileLabel, startAnalysis} from './desktop'
+import {detailQuery, openProgress, profileLabel} from './desktop'
 import type {NodeIdentity} from './desktop'
 
 const params=new URLSearchParams(location.search)
@@ -77,8 +77,7 @@ export default function Detail() {
     setBusy(true)
     setError('')
     try {
-      setRun(await startAnalysis(identity.revision,identity.unit))
-      await openProgress(identity.revision)
+      await openProgress(identity.revision,identity.profile,identity.unit)
     } catch (error) {setError(String(error))}
     finally {setBusy(false)}
   }
@@ -96,7 +95,7 @@ export default function Detail() {
               stale?'오래된 결과':result?statuses[result.status] || result.status:
                 task?statuses[task.state] || task.state:'미분석'}
           </span>
-          <span>{identity.revision.slice(0,8)}{identity.profile && ' · '+profileLabel(identity.profile)}</span>
+          {identity.profile && <span>{profileLabel(identity.profile)}</span>}
         </div>
       </header>
       {stale && <p className="detail-notice">이전 분석의 의미입니다. 재분석 전에는 현재 원본의 근거로 연결하지 않습니다.</p>}

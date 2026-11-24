@@ -12,6 +12,31 @@ from contextlib import contextmanager
 VERSION = "1"
 COMPOSITION_SCHEMA = "split-meaning-v1"
 RELATION_KINDS = ("call", "reference", "data", "condition", "state", "contains", "inheritance")
+
+
+class AnalysisBusy(ValueError):
+    pass
+
+
+@contextmanager
+def analysis_lock(path, revision):
+    """Exclude changes to an active snapshot across CLI and desktop processes."""
+    directory = path.parent / ".analysis-locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / digest(revision.encode())).open("a+b") as handle:
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise AnalysisBusy("An analysis is active for this code version.") from exc
+        yield
+
+
 EXCLUDED = {".git", ".venv", "venv", "__pycache__", ".codex", ".tox", ".uv-cache",
             ".pytest_cache", ".mypy_cache", "node_modules", ".agent-venv"}
 
@@ -42,6 +67,12 @@ def database(path):
                 target TEXT, PRIMARY KEY(snapshot,profile,unit,target));
             CREATE TABLE IF NOT EXISTS feedback(snapshot TEXT, profile TEXT, unit TEXT,
                 time TEXT DEFAULT CURRENT_TIMESTAMP, data TEXT);
+            CREATE TABLE IF NOT EXISTS analysis_retry(snapshot TEXT, profile TEXT, unit TEXT,
+                attempt INTEGER, phase TEXT, signature TEXT, data TEXT,
+                PRIMARY KEY(snapshot,profile,unit,attempt));
+            CREATE TABLE IF NOT EXISTS analysis_run(snapshot TEXT, profile TEXT, state TEXT, data TEXT,
+                time TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(snapshot,profile));
+            CREATE TABLE IF NOT EXISTS snapshot_history(snapshot TEXT PRIMARY KEY, registered TEXT);
         """)
         with db:
             yield db
@@ -241,8 +272,11 @@ def validate_meaning(unit, role, steps, unresolved, *, units=None, block_meaning
         if set(step) != {"text", "sites"} or not isinstance(step["text"], str) or not step["text"].strip():
             raise ValueError("Each detail needs text and source site IDs.")
         refs = step["sites"]
-        if not isinstance(refs, list) or not refs or any(not isinstance(x, str) or x not in sites for x in refs):
+        if not isinstance(refs, list) or not refs:
             raise ValueError("Details must cite owned source sites.")
+        invalid = [ref for ref in refs if not isinstance(ref, str) or ref not in sites]
+        if invalid:
+            raise ValueError(f"Details must cite owned source sites for {unit['id']}; invalid IDs: {encode(invalid)}")
         covered.update(refs)
     if any(not item.strip() for item in unresolved):
         raise ValueError("Give a reason for each unresolved item.")

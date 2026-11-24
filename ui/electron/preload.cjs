@@ -6,7 +6,11 @@ contextBridge.exposeInMainWorld('reviewDesktop', {
   pickFolder: () => ipcRenderer.invoke('review:folder'),
   login: account => ipcRenderer.invoke('review:login', account),
   openSettings: () => ipcRenderer.invoke('review:settings'),
-  openProgress: revision => ipcRenderer.invoke('review:progress', revision),
+  openProgress: (revision, profile, unit) => ipcRenderer.invoke('review:progress', revision, profile, unit),
+  openProjects: () => ipcRenderer.invoke('review:projects'),
+  focusGraph: () => ipcRenderer.invoke('review:focus-graph'),
+  deleteProject: project => ipcRenderer.invoke('review:delete-project', project),
+  openReview: value => ipcRenderer.invoke('review:analysis-review', value),
   preferences: () => ipcRenderer.invoke('review:preferences'),
   onPreferences: listener => {
     const handle = (_, value) => listener(value)

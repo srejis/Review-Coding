@@ -1,14 +1,10 @@
 import {useEffect, useRef, useState} from 'react'
 import {request,meaningSites} from './api'
-import {openProgress, openSettings, startAnalysis, usePreferences} from './desktop'
+import {openProgress, profileLabel} from './desktop'
 import type {Project, Result, Run, Snapshot, Trace, Unit} from './api'
 
 const categoryOptions = ['검수 메모','설명 누락','잘못된 연결','너무 추상적','근거 없는 의미']
 const certainty: Record<string,string> = { confirmed:'근거 포함 · 모델 확정', candidate:'후보', unresolved:'미해결', external:'외부 경계' }
-const profileLabel = (raw: string) => {
-  const p = JSON.parse(raw)
-  return [p.model, p.effort, p.engine || '이전 실행', p.prompt_hash?.slice(0,7)].filter(Boolean).join(' · ')
-}
 
 function SourcePanel({unit, source, lines}: {unit?:Unit; source:string; lines:number[]}) {
   const marked = useRef<HTMLDivElement>(null)
@@ -91,27 +87,24 @@ function Findings({unit, result, snapshot, navigate, highlight}: {
 
 export default function Management() {
   const initial = new URLSearchParams(window.location.search)
-  const [projects,setProjects]=useState<Project[]>([])
   const [revision,setRevision]=useState('')
   const [snapshot,setSnapshot]=useState<Snapshot>()
-  const [profile,setProfile]=useState(initial.get('profile') || '')
+  const profile=initial.get('profile') || ''
   const [selected,setSelected]=useState(initial.get('unit') || '')
-  const [folder,setFolder]=useState('')
   const [filter,setFilter]=useState('')
   const [tab,setTab]=useState<'findings'|'events'|'feedback'>('findings')
   const [highlight,setHighlight]=useState<number[]>([])
   const [trace,setTrace]=useState<Trace[]>([])
-  const [run,setRun]=useState<Run>()
   const [error,setError]=useState('')
   const [category,setCategory]=useState(categoryOptions[0])
   const [note,setNote]=useState('')
   const [busy,setBusy]=useState(false)
   const [refresh,setRefresh]=useState(0)
-  const preferences=usePreferences(setError)
 
   useEffect(() => {
-    request<Project[]>('/api/projects').then(rows=>{setProjects(rows);setRevision(initial.get('revision') || rows[0]?.id || '')})
-      .catch(e=>setError(e.message))
+    const chosen=initial.get('revision')
+    if (chosen) setRevision(chosen)
+    else request<Project[]>('/api/projects').then(rows=>setRevision(rows[0]?.id || '')).catch(e=>setError(e.message))
   }, [])
 
   useEffect(() => {
@@ -142,7 +135,6 @@ export default function Management() {
     }
     events.addEventListener('run', event=>{
       const state=JSON.parse(event.data) as Run
-      setRun(state)
       if (state.state !== 'running') setRefresh(value=>value+1)
     })
     return ()=>{events.close();window.clearTimeout(refreshTimer)}
@@ -161,55 +153,29 @@ export default function Management() {
   const visibleTrace=trace.filter(item=>!snapshot?.profile || JSON.stringify(item.profile)===JSON.stringify(JSON.parse(snapshot.profile)))
   const submitted=Object.values(snapshot?.results || {}).filter(value=>value.status==="submitted").length
   const partial=Object.values(snapshot?.results || {}).filter(value=>value.status==="partial").length
-  const active=run?.state === 'running'
   function navigate(id:string,line?:number) {
     setSelected(id)
     setHighlight([line ?? snapshot?.units[id]?.line ?? 1])
-  }
-  function switchProject(id:string) {
-    setSnapshot(undefined);setRevision(id);setProfile('');setSelected('')
-    setHighlight([]);setTrace([]);setRun(undefined)
   }
   async function action(work:()=>Promise<void>) {
     setError('');setBusy(true)
     try { await work() } catch(e) { setError(e instanceof Error ? e.message : '요청 실패') }
     finally {setBusy(false)}
   }
-  const register=()=>action(async()=>{
-    const {id}=await request<{id:string}>('/api/register',{root:folder})
-    setProjects(await request<Project[]>('/api/projects'));switchProject(id);setFolder('')
-  })
-  const analyze=(id?:string)=>action(async()=>{
-    setRun(await startAnalysis(revision,id))
-    setProfile('');setTab('events');await openProgress(revision)
-  })
-
   return <main className="shell">
     <header className="top">
       <div className="title"><span className="brand">RC</span><div><h1>Review-Coding</h1><p>Python 코드 검수</p></div></div>
-      <button onClick={()=>action(openSettings)}>설정</button>
+      <button disabled={!revision} onClick={()=>action(()=>openProgress(revision,snapshot?.profile))}>분석 관리</button>
     </header>
-    <section className="toolbar" aria-label="분석 실행">
-      <span>{preferences.model} · {preferences.effort}</span>
-      <button className="primary" disabled={!revision || busy || active} onClick={()=>analyze()}>분석·재개</button>
-      <button disabled={!unit || busy || active} onClick={()=>analyze(selected)}>선택 단위 분석</button>
-      {active && <button onClick={()=>action(()=>openProgress(revision))}>분석 진행</button>}
-      {run && <span className="muted" role="status">{run.error || ({running:'분석 중',partial:'부분 분석',unit_limit:'단위 한도 도달',finished:'완료',cancelled:'중단됨',time_limit:'시간 한도 도달'}[run.state] || run.state)}
-        {run.remaining !== undefined && ` · 남은 단위 ${run.remaining}개`}</span>}
+    <section className="toolbar"><span title={snapshot?.root}>{snapshot?.root?.split(/[\\/]/).at(-1) || '프로젝트'}</span>
+      {snapshot?.profile && <span className="muted">{profileLabel(snapshot.profile)}</span>}
+      {unit && <button onClick={()=>action(()=>openProgress(revision,snapshot?.profile,unit.id))}>선택 단위 분석 관리</button>}
     </section>
     {error && <div role="alert" className="alert">{error}</div>}
     <div className="workspace">
       <aside className="tree panel">
-        <div className="panel-title"><strong>프로젝트</strong><span>{projects.length}개 스냅샷</span></div>
+        <div className="panel-title"><strong>코드 단위</strong><span>{units.length}개</span></div>
         <div className="tree-controls">
-          <form onSubmit={event=>{event.preventDefault();register()}}><input aria-label="Python 폴더 경로" placeholder="Python 폴더 경로" value={folder} onChange={event=>setFolder(event.target.value)}/><button disabled={!folder.trim()||busy}>등록</button></form>
-          <select aria-label="스냅샷 선택" value={revision} onChange={event=>switchProject(event.target.value)}>
-            {!revision && <option value="">스냅샷 선택</option>}
-            {projects.map(item=><option key={item.id} value={item.id}>{item.root.split(/[\\/]/).at(-1)} · {item.id.slice(0,8)}</option>)}
-          </select>
-          {snapshot?.profiles.length ? <select aria-label="분석 프로필" value={snapshot.profile} onChange={event=>setProfile(event.target.value)}>
-            {snapshot.profiles.map(value=><option key={value} value={value}>{profileLabel(value)}</option>)}
-          </select> : null}
           <input aria-label="단위 검색" placeholder="파일 또는 단위 검색" value={filter} onChange={event=>setFilter(event.target.value)}/>
         </div>
         <div className="unit-list">
@@ -233,7 +199,7 @@ export default function Management() {
         </nav>
         <div className="review-body">
           {tab==='findings' && (unit && snapshot ? <Findings unit={unit} result={result} snapshot={snapshot} navigate={navigate} highlight={setHighlight}/>
-            : <p className="empty">Python 폴더를 등록해 검수를 시작하세요.</p>)}
+            : <p className="empty">이 분석에서 검수할 코드 단위가 없습니다.</p>)}
           {tab==='events' && (visibleTrace.length ? visibleTrace.slice().reverse().map(item=><details key={item.id} className="event">
             <summary>{item.event.tool || taskName[item.event.state || ""] || item.event.state}
               {item.event.unit && " · " + (snapshot?.units[item.event.unit]?.name || item.event.unit)} <span>{item.time}</span></summary>

@@ -7,6 +7,73 @@ const { _electron } = require('playwright-core')
 const data = process.env.REVIEW_CODING_DATA
 const screenshot = process.env.REVIEW_CODING_SCREENSHOTS
 
+async function selectCode(page, revision, profile='') {
+  const origin=new URL(page.url()).origin
+  const projects=await fetch(origin+'/api/project-catalog').then(response=>response.json())
+  const project=projects.find(item=>item.snapshots.some(code=>code.id===revision))
+  assert.ok(project)
+  await page.evaluate(value=>{
+    const key='review-coding-project'
+    localStorage.setItem(key,JSON.stringify(value))
+    dispatchEvent(new StorageEvent('storage',{key}))
+  },{project:project.id,revision,profile})
+  await page.getByRole('button',{name:'프로젝트 관리'}).filter({hasText:project.name}).waitFor()
+}
+
+test('project management groups revisions, opens history and safely deletes app data', {
+  skip: process.env.REVIEW_CODING_TEST_LAYOUT !== 'isolated' && 'Requires a disposable copied data directory.',
+  timeout: 60000
+}, async () => {
+  const {mkdir,readFile,writeFile}=require('node:fs/promises')
+  const desktop=await _electron.launch({args:[path.resolve(__dirname,'..')],timeout:25000})
+  try {
+    const main=await desktop.firstWindow()
+    const origin=new URL(main.url()).origin
+    const list=()=>fetch(origin+'/api/project-catalog').then(r=>r.json())
+    const source=path.join(path.dirname(data),'project-manager-fixture')
+    await mkdir(source,{recursive:true})
+    const file=path.join(source,'example.py')
+    await writeFile(file,'value = 1\n')
+    const projectsReady=desktop.waitForEvent('window')
+    await main.getByRole('button',{name:'프로젝트 관리'}).click()
+    const projects=await projectsReady
+    await projects.getByRole('heading',{name:'프로젝트 관리'}).waitFor()
+    await desktop.evaluate(({dialog},source)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[source]})},source)
+    await projects.getByRole('button',{name:'프로젝트 등록'}).click()
+    const card=projects.locator('.project-card').filter({has:projects.getByRole('heading',{name:path.basename(source),exact:true})})
+    await card.waitFor()
+    const first=(await list()).find(p=>p.root===source)
+    assert.equal(first.snapshots.length,1)
+    await writeFile(file,'value = 2\n')
+    await projects.getByRole('button',{name:'프로젝트 등록'}).click()
+    await card.getByText(/2개 버전/).waitFor()
+    assert.equal(await card.count(),1)
+    await card.locator('summary').first().click()
+    await card.getByText(/이전 코드/).waitFor()
+    await card.getByRole('button',{name:'이 코드 보기'}).last().click()
+    await main.getByRole('button',{name:'프로젝트 관리'}).filter({hasText:path.basename(source)}).waitFor()
+    assert.equal(await main.getByRole('combobox').count(),0)
+    assert.equal(await main.locator('.map-primary').count(),1)
+    await main.getByRole('button',{name:'분석 시작',exact:true}).waitFor()
+    const details=desktop.waitForEvent('window')
+    const unit=await fetch(origin+'/api/snapshot?'+new URLSearchParams({revision:first.latest,view:'graph'}))
+      .then(response=>response.json()).then(value=>Object.values(value.units)[0])
+    await main.evaluate(identity=>window.reviewDesktop.openDetail(identity),
+      {revision:first.latest,root:source,profile:'',unit:unit.id})
+    const detail=await details
+    await detail.getByRole('heading',{name:'example.py',exact:true}).waitFor()
+    const closed=detail.waitForEvent('close')
+    await card.getByRole('button',{name:'프로젝트 삭제'}).click()
+    const confirmation=projects.getByRole('alertdialog')
+    await confirmation.getByText(/원본 폴더와 소스 파일은 보존됩니다/).waitFor()
+    await confirmation.getByRole('button',{name:'앱 데이터 삭제'}).click()
+    await closed
+    await card.waitFor({state:'detached'})
+    assert.equal(await readFile(file,'utf8'),'value = 2\n')
+    assert.ok((await list()).some(project=>project.name==='97_rembg'))
+  } finally {await desktop.close().catch(()=>{})}
+})
+
 test('Windows Electron uses real snapshots and manages independent detail windows', {
   skip: !data && 'Set REVIEW_CODING_DATA to a data directory containing analyzed check_cases.',
   timeout: 120000
@@ -22,14 +89,12 @@ test('Windows Electron uses real snapshots and manages independent detail window
     const projects = await fetch(origin + '/api/projects').then(response => response.json())
     const project = projects.find(project => path.basename(project.root) === 'check_cases')
     assert.ok(project, 'Register and analyze check_cases first.')
-    await main.getByRole('combobox', { name: '프로젝트·스냅샷' }).selectOption(project.id)
-    const select = main.getByRole('combobox', { name: '분석 프로필' })
-    await select.waitFor()
+    await selectCode(main,project.id)
     const load = (profile, view, unit) => fetch(origin + '/api/snapshot?' +
-      new URLSearchParams({ revision: project.id, profile, view, ...(unit ? { unit } : {}) }))
+      new URLSearchParams({ revision: project.id, ...(profile ? {profile} : {}), view, ...(unit ? { unit } : {}) }))
       .then(response => response.json())
-    const initialProfile=await select.inputValue()
-    const initialView=await load(initialProfile,'graph')
+    const initialView=await load('','graph')
+    const initialProfile=initialView.profile
     if (initialView.graph.counts.completed===0 && initialView.graph.counts.partial) {
       await main.getByText(/완료 0 · 부분 제출/).first().waitFor()
       await main.getByRole('textbox',{name:'함수·클래스·파일 검색'}).fill('normalize')
@@ -46,7 +111,7 @@ test('Windows Electron uses real snapshots and manages independent detail window
       data.graph.nodes.some(node=>node.name==='append_scores') && data.graph.edges.some(edge=>edge.source!==edge.target))
     assert.ok(completed,'Register a completed normalize and append_scores profile.')
     const profile=completed.profile
-    if (profile!==initialProfile) await select.selectOption(profile)
+    if (profile!==initialProfile) await selectCode(main,project.id,profile)
     const getSnapshot=(view,unit)=>load(profile,view,unit)
     const snapshot=completed.data
     assert.deepEqual(snapshot.files,{})
@@ -172,13 +237,11 @@ test('Windows Electron uses real snapshots and manages independent detail window
     await again.getByRole('heading', {name:'normalize', exact:true}).waitFor()
     assert.equal(await pixels(),preserved)
 
-    const choices = await select.locator('option').evaluateAll(items=>items.map(item=>item.value))
+    const choices = initialView.profiles
     const alternative = choices.find(value=>value!==profile &&
       candidates.find(item=>item.profile===value)?.data.graph.nodes.some(node=>node.name==='normalize'))
     if (alternative) {
-      await select.selectOption(alternative)
-      await main.waitForFunction(value =>
-        document.querySelector('[aria-label="분석 프로필"]')?.value === value, alternative)
+      await selectCode(main,project.id,alternative)
       const alternateWindow=await open('normalize')
       assert.equal(new URL(alternateWindow.url()).searchParams.get('profile'),alternative)
       assert.equal(new URL(again.url()).searchParams.get('profile'),profile)
@@ -187,17 +250,16 @@ test('Windows Electron uses real snapshots and manages independent detail window
 
     const differentProject = projects.find(candidate => candidate.id !== project.id)
     if (differentProject) {
-      await main.getByRole('combobox', {name:'프로젝트·스냅샷'}).selectOption(differentProject.id)
+      await selectCode(main,differentProject.id)
       await waitSelection(0)
       assert.equal(new URL(again.url()).searchParams.get('revision'),project.id)
       assert.equal(await again.locator('.detail-role').textContent(),normalizeData.results[normalize.id].meaning.role)
-      await main.getByRole('combobox', {name:'프로젝트·스냅샷'}).selectOption(project.id)
-      await select.waitFor()
+      await selectCode(main,project.id,profile)
     }
 
     const dense = projects.find(candidate => path.basename(candidate.root) === '97_rembg')
     if (dense) {
-      await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(dense.id)
+      await selectCode(main,dense.id)
       const denseGraph = await fetch(origin+'/api/snapshot?'+new URLSearchParams({
         revision:dense.id,view:'graph'
       })).then(response=>response.json())
@@ -220,8 +282,7 @@ test('Windows Electron uses real snapshots and manages independent detail window
       await waitSelection(all.filter(unit=>unit.file===choice.file && visible.has(unit.id)).length)
       assert.equal(await main.locator('.map-selection').count(),0)
       if (screenshot) await main.screenshot({path:path.join(screenshot,'review-coding-rembg-tree.png')})
-      await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(project.id)
-      await select.waitFor()
+      await selectCode(main,project.id,profile)
     }
 
     if (screenshot) {
@@ -229,10 +290,13 @@ test('Windows Electron uses real snapshots and manages independent detail window
       await b.evaluate(()=>window.scrollTo(0,0))
       await b.screenshot({path:path.join(screenshot,'review-coding-meaning.png'),fullPage:true})
     }
+    const progressOpened=desktop.waitForEvent('window')
+    await main.locator('.map-primary').click()
+    const progressWindow=await progressOpened
     const management=desktop.waitForEvent('window')
-    await main.getByRole('button',{name:'검수·이력 및 내보내기'}).click()
+    await progressWindow.getByRole('button',{name:'검수·실행 기록·내보내기'}).click()
     const control=await management
-    await control.getByRole('button',{name:'분석·재개'}).waitFor()
+    await control.getByRole('button',{name:'분석 관리'}).waitFor()
     assert.equal(await control.getByRole('combobox',{name:'모델',exact:true}).count(),0)
     await control.getByRole('link',{name:'JSON 내보내기'}).waitFor()
 
@@ -249,10 +313,10 @@ test('Windows Electron uses real snapshots and manages independent detail window
       await settings.getByRole('button',{name:'설정 저장'}).click()
       await settings.getByText('저장했습니다.',{exact:false}).waitFor()
       await settings.close()
-      const progressPromise=desktop.waitForEvent('window')
-      await main.getByRole('button',{name:'분석 시작',exact:true}).click()
-      const progress=await progressPromise
-      await progress.getByText('분석 실패',{exact:true}).waitFor()
+      const progress=progressWindow
+      await progress.getByText('현재 설정으로 별도 실행',{exact:true}).click()
+      await progress.getByRole('button',{name:'새 설정으로 분석 시작',exact:true}).click()
+      await progress.getByText('실행 오류',{exact:true}).waitFor()
       assert.match(await progress.getByRole('alert').textContent(),/ChatGPT/)
       const run=await fetch(origin+'/api/run').then(response=>response.json())
       assert.equal(run.model,'gpt-6-luna')
@@ -290,7 +354,7 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
     const gate=new Promise(resolve=>{unblock=resolve})
     const match=url=>url.pathname==='/api/snapshot' && url.searchParams.get('revision')===samples.id &&
       url.searchParams.get('view')==='graph'
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await selectCode(main,other.id)
     await main.locator('.map-footer').getByText(/173개 단위/).waitFor()
     await main.route(match,async route=>{
       const response=await route.fetch()
@@ -298,12 +362,13 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
       await gate
       await route.fulfill({response}).catch(()=>{})
     },{times:1})
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(samples.id)
+    await selectCode(main,samples.id)
     await held
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await selectCode(main,other.id)
     await main.locator('.map-footer').getByText(/173개 단위/).waitFor()
     unblock()
-    const profile=await main.getByRole('combobox',{name:'분석 프로필'}).inputValue()
+    const profile=(await fetch(origin+'/api/snapshot?'+new URLSearchParams({revision:other.id,view:'graph'}))
+      .then(response=>response.json())).profile
     const query=new URLSearchParams({revision:other.id,profile,view:'graph'})
     const snapshot=await fetch(origin+'/api/snapshot?'+query).then(response=>response.json())
     const ids=snapshot.graph.nodes.map(node=>node.id).sort()
@@ -326,7 +391,7 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
 
     desktop=await start()
     main=await desktop.firstWindow()
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await selectCode(main,other.id)
     await main.locator('.map-footer').getByText(status).waitFor()
     await main.waitForFunction(()=>{
       const canvas=document.querySelector('canvas')
@@ -338,7 +403,7 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
     await writeFile(cache,'{damaged cache','utf8')
     desktop=await start()
     main=await desktop.firstWindow()
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
+    await selectCode(main,other.id)
     await main.locator('.map-footer').getByText(status).waitFor()
     assert.deepEqual(Object.keys((await cached()).positions).sort(),ids)
   } finally {
@@ -368,10 +433,9 @@ test('Windows Electron applies all three themes to existing windows and restores
     const origin=new URL(main.url()).origin
     const project=(await fetch(origin+'/api/projects').then(r=>r.json()))
       .find(project=>path.basename(project.root)==='check_cases')
-    await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(project.id)
-    const select=main.getByRole('combobox',{name:'분석 프로필'})
-    await select.waitFor()
-    const profiles=await select.locator('option').evaluateAll(items=>items.map(item=>item.value))
+    await selectCode(main,project.id)
+    const profiles=(await fetch(origin+'/api/snapshot?'+new URLSearchParams({revision:project.id,view:'graph'}))
+      .then(response=>response.json())).profiles
     let snapshot
     for (const profile of profiles) {
       const query=new URLSearchParams({revision:project.id,profile,view:'graph'})
@@ -380,7 +444,7 @@ test('Windows Electron applies all three themes to existing windows and restores
           candidate.graph.edges.length) {snapshot=candidate;break}
     }
     assert.ok(snapshot)
-    await select.selectOption(snapshot.profile)
+    await selectCode(main,project.id,snapshot.profile)
     await main.locator('.map-footer').getByText(/완료 [1-9]/).waitFor()
     assert.deepEqual(await main.evaluate(()=>window.reviewDesktop.preferences()),{...legacy,theme:'editorial'})
     assert.deepEqual(JSON.parse(await readFile(file,'utf8')),legacy)
@@ -407,9 +471,13 @@ test('Windows Electron applies all three themes to existing windows and restores
     for (const page of [main,a,b,progress,management]) page.on('request',request=>{
       if (/\/api\/(analyze|cancel)$/.test(request.url()) && request.method()==='POST') analyzeRequests++
     })
-    await progress.route('**/api/run',route=>route.fulfill({json:{revision:project.id,state:'running',
-      model:legacy.model,effort:legacy.effort,submitted:1,left:3,current_unit:'normalize',phase:'SEMANTICIZING'}}))
+    await progress.route('**/api/analysis?*',async route=>{
+      const state=await route.fetch().then(response=>response.json())
+      await route.fulfill({json:{...state,state:'running',
+        live:{revision:project.id,current_unit:'normalize',phase:'SEMANTICIZING'}}})
+    })
     await progress.getByRole('status').filter({hasText:'분석 중'}).waitFor()
+    await progress.getByRole('button',{name:'분석 중단',exact:true}).waitFor()
     const settings=await open(()=>main.evaluate(()=>window.reviewDesktop.openSettings()))
     await settings.getByRole('button',{name:'테마',exact:true}).click()
     await settings.getByRole('radio',{name:/Editorial/}).isChecked().then(checked=>assert.ok(checked))
@@ -448,7 +516,7 @@ test('Windows Electron applies all three themes to existing windows and restores
       await picker.getByText('저장했습니다.').waitFor()
       for (const page of [main,a,b,progress,management,picker]) await appearance(page,theme)
       await main.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
-      const control=await main.locator('.map-header select').evaluate(element=>{
+      const control=await main.getByRole('button',{name:'프로젝트 관리'}).evaluate(element=>{
         const style=getComputedStyle(element)
         return {
           color:style.color,
@@ -460,7 +528,7 @@ test('Windows Electron applies all three themes to existing windows and restores
       surfaces.add(await a.locator('.detail-shell').evaluate(el=>getComputedStyle(el).backgroundColor))
       images.add(await pixels())
       assert.deepEqual(await a.locator('.evidence-line').allTextContents(),picked)
-      assert.equal(await select.inputValue(),snapshot.profile)
+      assert.equal(await main.evaluate(()=>JSON.parse(localStorage.getItem('review-coding-project')).profile),snapshot.profile)
       assert.equal(await readFile(layoutFile,'utf8'),layout)
       assert.equal(desktop.windows().length,stableWindowCount)
       await main.locator('.map-footer').getByText(/선택 1개/).waitFor()
