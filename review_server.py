@@ -213,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Unknown analysis profile.")
         graph = None
         if view == "graph":
-            graph = completed_graph(revision, units, results, tasks)
+            graph = completed_graph(revision, units, results, tasks, files)
             files, feedback = {}, []
             results = {uid: {**conn, "status": results.get(uid, {}).get("status", "")}
                        for uid, conn in connections.items()} | {

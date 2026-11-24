@@ -20,7 +20,7 @@ try {
     name: 'review-coding', version: dependencies.version, main: 'electron/main.cjs'
   }))
   await mkdir(path.join(backend, 'ui'), { recursive: true })
-  const backendFiles = ['main.py', 'review_server.py', 'graph_view.py', 'source.py', 'agent.py', 'mcp_tools.py',
+  const backendFiles = ['main.py', 'review_server.py', 'graph_view.py', 'source.py', 'source_relations.py', 'agent.py', 'mcp_tools.py',
     'dependency_scheduler.py', 'dependency_store.py', 'chatgpt_auth.py', 'responses.py', 'requirements.txt']
   for (const file of backendFiles) await cp(path.join(root, file), path.join(backend, file))
   await cp(path.join(ui, 'dist'), path.join(backend, 'ui', 'dist'), { recursive: true })

@@ -239,17 +239,20 @@ class PartitionTests(unittest.IsolatedAsyncioTestCase):
     async def test_graph_rejects_old_composition_or_changed_block_without_new_edges(self):
         _, (_, _, _, results) = await self.run_parent()
         uid = self.parent["id"]
-        graph = completed_graph(self.rev, self.snap["units"], results, {})
+        def graph_for(saved):
+            return completed_graph(self.rev, self.snap["units"], saved, {}, self.snap["files"])
+
+        graph = graph_for(results)
         self.assertIn(uid, [node["id"] for node in graph["nodes"]])
         self.assertEqual(graph["edges"], [])
         changed = json.loads(encode(results))
         changed[self.blocks[0]["id"]]["version"] = "different-block-version"
         self.assertNotIn(uid, [node["id"] for node in
-                              completed_graph(self.rev, self.snap["units"], changed, {})["nodes"]])
+                              graph_for(changed)["nodes"]])
         legacy = json.loads(encode(results))
         del legacy[uid]["meaning"]["composition"]
         self.assertNotIn(uid, [node["id"] for node in
-                              completed_graph(self.rev, self.snap["units"], legacy, {})["nodes"]])
+                              graph_for(legacy)["nodes"]])
 
     async def test_parent_requires_actual_block_source_and_meaning_reads(self):
         _, (_, _, _, results) = await self.run_parent()

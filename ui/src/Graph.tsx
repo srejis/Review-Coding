@@ -4,14 +4,14 @@ import type {LayoutScope} from './desktop'
 import {useGraphLayout} from './useGraphLayout'
 import {currentTheme,motionPreference} from './theme'
 import type {Point} from './treeLayout'
+import {cameraProjection,clamp,hitsNode,nodeRadius,projectNode} from './graphGeometry'
+import type {Projected} from './graphGeometry'
+import {paintEdge,paintNode,prepareEdges,readMaterial} from './graphRender'
 
-type Node = {id:string; name:string; quality:boolean}
-type Projected = Node & {sx:number; sy:number; radius:number; depth:number; alpha:number}
 const initialCamera=()=>({pitch:.12,yaw:-.35,distance:950,zoom:1,panX:0,panY:0,target:{x:0,y:0,z:0}})
 type Camera=ReturnType<typeof initialCamera>
-const clamp=(value:number,min:number,max:number)=>Math.min(max,Math.max(min,value))
 
-function fit(points:Point[]) {
+function fit(points:Point[],camera:Camera,canvas:HTMLCanvasElement|null) {
   if (!points.length) return null
   const low={x:Infinity,y:Infinity,z:Infinity}, high={x:-Infinity,y:-Infinity,z:-Infinity}
   for (const point of points) for (const axis of ['x','y','z'] as const) {
@@ -21,7 +21,18 @@ function fit(points:Point[]) {
   const target={x:(low.x+high.x)/2,y:(low.y+high.y)/2,z:(low.z+high.z)/2}
   const radius=Math.max(20,Math.hypot(high.x-low.x,high.y-low.y,high.z-low.z)/2)
   const distance=Math.max(950,radius*2.4)
-  return {target,distance,zoom:clamp(255*(distance-radius)/(950*radius),.1,2.2),panX:0,panY:0}
+  const width=canvas?.clientWidth || 900,height=canvas?.clientHeight || 650
+  const view=cameraProjection(camera.yaw,camera.pitch,distance,950*Math.min(width,height)/710,0,0)
+  let spanX=0,spanY=0
+  for (const point of points) {
+    const p=view.rotate({x:point.x-target.x,y:point.y-target.y,z:point.z-target.z})
+    p.z+=distance
+    const {x,y}=view.project(p)
+    spanX=Math.max(spanX,Math.abs(x))
+    spanY=Math.max(spanY,Math.abs(y))
+  }
+  const zoom=clamp(Math.min(width*.39/(spanX+1),height*.39/(spanY+1)),.1,3.4)
+  return {target,distance,zoom,panX:0,panY:0}
 }
 
 export default function Graph({scope,graph,selected,focus,reset,choose,open,report}:{
@@ -35,20 +46,18 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
   const flight=useRef<{from:Camera; to:Camera; start:number; duration:number}|undefined>(undefined)
   const interaction=useRef<{x:number;y:number;startX:number;startY:number;pan:boolean}|null>(null)
   const cameraTouched=useRef(false)
-  const nodes=useMemo(()=>graph?.nodes.map(node=>({
-    id:node.id,name:node.name,quality:node.quality
-  })) || [],[graph])
-  const edges=useMemo(()=>graph?.edges.map(edge=>({
-    from:edge.source,to:edge.target,dependency:edge.dependency,
-    certain:edge.certainty==='confirmed',kind:edge.kind,
-    key:JSON.stringify([edge.source,edge.target,edge.kind,edge.certainty,edge.dependency])
-  })) || [],[graph])
+  const nodes=useMemo(()=>graph?.nodes || [],[graph])
+  const edges=useMemo(()=>prepareEdges(graph?.edges || []),[graph])
+  const animatedEdges=useMemo(()=>{
+    const prioritized=edges.filter(edge=>selected.has(edge.source) || selected.has(edge.target))
+    return new Set([...new Set([...prioritized,...edges].map(edge=>edge.key))].slice(0,120))
+  },[edges,selected])
   const layout=useGraphLayout(scope,graph,()=>draw.current(),positions=>{
-    const view=fit(Object.values(positions))
+    const view=fit(Object.values(positions),camera.current,canvas.current)
     if (view && !cameraTouched.current) Object.assign(camera.current,view)
   },report)
-  const latest=useRef({nodes,edges,selected,choose,open})
-  latest.current={nodes,edges,selected,choose,open}
+  const latest=useRef({nodes,edges,animatedEdges,selected,choose,open})
+  latest.current={nodes,edges,animatedEdges,selected,choose,open}
 
   const lastClick=useRef<string|null>(null)
   const priorReset=useRef(reset)
@@ -107,8 +116,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
         else animating=true
       }
       const {yaw,pitch,zoom,panX,panY,target,distance}=camera.current
-      const {nodes,edges,selected}=latest.current
-      const sinY=Math.sin(yaw),cosY=Math.cos(yaw),sinX=Math.sin(pitch),cosX=Math.cos(pitch)
+      const {nodes,edges,animatedEdges,selected}=latest.current
       function prune(known:Map<string,Reveal>,ids:string[]) {
         const current=new Set(ids)
         for (const id of known.keys()) if (!current.has(id)) known.delete(id)
@@ -128,58 +136,51 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
         return 1-(1-progress)**2
       }
       const scale=Math.min(width,height)/710
+      const view=cameraProjection(yaw,pitch,distance,950*scale*zoom,width/2+panX,height/2+panY)
       const points=nodes.flatMap(node=>{
         const point=layout.coordinates.current[node.id]
         if (!point) return []
-        const x=point.x-target.x,y=point.y-target.y,z=point.z-target.z
-        const rx=x*cosY-z*sinY, rz=x*sinY+z*cosY
-        const ry=y*cosX-rz*sinX, depth=distance+y*sinX+rz*cosX
-        const perspective=950*scale*zoom/depth
-        if (depth<50) return []
-        const alpha=reveal(starts,node.id)
-        return [{...node,depth,alpha,sx:width/2+rx*perspective+panX,sy:height/2-ry*perspective+panY,
-          radius:clamp((nodes.length>250?6:10)*perspective,3,16)*(.75+.25*alpha)}]
+        const projected=projectNode(node,point,target,nodeRadius(node.degree,zoom),reveal(starts,node.id),view)
+        return projected?[projected]:[]
       }).sort((a,b)=>b.depth-a.depth)
       projected.current=points
       const position=new Map(points.map(node=>[node.id,node]))
+      let flowing=false
+      const seconds=now/1000
+      const edgeOpacity=.72/Math.sqrt(Math.max(1,edges.length/120))
       for (const edge of edges) {
-        const a=position.get(edge.from),b=position.get(edge.to)
+        const a=position.get(edge.source),b=position.get(edge.target)
         if (!a || !b) continue
-        const important=selected.has(edge.from) || selected.has(edge.to)
-        const color=edge.dependency?'#bc9ef0':edge.kind==='call'?'#74c7bf':'#829ca6'
-        const dx=b.sx-a.sx,dy=b.sy-a.sy,len=Math.hypot(dx,dy)
-        const shorten=b.radius+4
-        ctx.globalAlpha=(important?.9:.34)*reveal(edgeStarts,edge.key)
-        ctx.strokeStyle=color
-        ctx.lineWidth=edge.dependency?2:1.3
-        ctx.setLineDash(edge.dependency?[3,4]:edge.certain?[]:[7,5])
-        ctx.beginPath()
-        if (a===b) ctx.arc(a.sx+a.radius,a.sy-a.radius,a.radius+5,0,Math.PI*2)
-        else if (len>shorten) {
-          ctx.moveTo(a.sx,a.sy)
-          ctx.lineTo(b.sx-dx*shorten/len,b.sy-dy*shorten/len)
-        }
-        ctx.stroke()
-        ctx.setLineDash([])
-        if (len>shorten+10) {
-          const angle=Math.atan2(dy,dx), tx=b.sx-dx*shorten/len, ty=b.sy-dy*shorten/len
-          ctx.beginPath()
-          ctx.moveTo(tx-6*Math.cos(angle-.55),ty-6*Math.sin(angle-.55))
-          ctx.lineTo(tx,ty)
-          ctx.lineTo(tx-6*Math.cos(angle+.55),ty-6*Math.sin(angle+.55))
-          ctx.stroke()
-        }
+        if (Math.min(a.sx,b.sx)>width+32 || Math.max(a.sx,b.sx)<-32 ||
+            Math.min(a.sy,b.sy)>height+32 || Math.max(a.sy,b.sy)<-32) continue
+        const important=selected.has(edge.source) || selected.has(edge.target)
+        const moving=!motion.matches && animatedEdges.has(edge.key)
+        flowing ||= moving
+        const alpha=(important?.98:edgeOpacity)*reveal(edgeStarts,edge.key)
+        paintEdge(ctx,edge,a,b,view,alpha,moving?seconds:0)
       }
-      ctx.globalAlpha=1
-      const labels=nodes.length<45 || (nodes.length<160 && zoom>1.65)
       for (const node of points) {
+        if (node.sx<-36 || node.sx>width+36 || node.sy<-36 || node.sy>height+36) continue
         const active=selected.has(node.id)
-        paintNode(ctx,node,labels || (active && selected.size<=18),active,material)
+        paintNode(ctx,node,active && selected.size<=18,active,material)
       }
       ctx.globalAlpha=1
       if (animating) draw.current()
+      else if (flowing) {
+        const next=(time:number)=>{
+          frame=time-now<33 ? requestAnimationFrame(next) : 0
+          if (!frame) paint(time)
+        }
+        frame=requestAnimationFrame(next)
+      }
     }
-    draw.current=()=>{if (!frame) frame=requestAnimationFrame(paint)}
+    let requested=false
+    draw.current=()=>{
+      if (requested) return
+      cancelAnimationFrame(frame)
+      requested=true
+      frame=requestAnimationFrame(now=>{requested=false;paint(now)})
+    }
     const observer=new ResizeObserver(draw.current)
     observer.observe(el)
     let wheel:number|undefined
@@ -212,7 +213,8 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     priorReset.current=reset
     cameraTouched.current=true
     const points=latest.current.nodes.flatMap(node=>layout.coordinates.current[node.id] || [])
-    flyTo({...initialCamera(),...fit(points)})
+    const initial=initialCamera()
+    flyTo({...initial,...fit(points,initial,canvas.current)})
   },[reset])
   useEffect(()=>{
     if (priorFocus.current===focus) return
@@ -220,7 +222,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
     cameraTouched.current=true
     const points=latest.current.nodes.flatMap(node=>
       latest.current.selected.has(node.id) ? (layout.coordinates.current[node.id] || []) : [])
-    const view=fit(points)
+    const view=fit(points,camera.current,canvas.current)
     if (!view) return
     flyTo({...camera.current,...view})
   },[focus])
@@ -271,9 +273,7 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
       const points=projected.current
       for (let i=points.length-1;i>=0;i--) {
         const node=points[i]
-        const dx=node.sx-x,dy=node.sy-y
-        const distance=currentTheme().shape==='precision' ? Math.max(Math.abs(dx),Math.abs(dy)) : Math.hypot(dx,dy)
-        if (node.alpha>0 && distance<=node.radius+4 &&
+        if (node.alpha>0 && hitsNode(node,x,y) &&
             latest.current.nodes.some(candidate=>candidate.id===node.id)) {
           lastClick.current=node.id
           latest.current.choose(node.id,event.ctrlKey || event.metaKey)
@@ -289,52 +289,4 @@ export default function Graph({scope,graph,selected,focus,reset,choose,open,repo
         latest.current.open(id)
       }
     }} />
-}
-
-function readMaterial(element:HTMLElement) {
-  const css=getComputedStyle(element)
-  const token=(name:string)=>css.getPropertyValue('--'+name).trim()
-  return {theme:currentTheme(),node:token('node'),quality:token('node-quality'),
-    stroke:token('node-stroke'),ring:token('ring'),text:token('stage-bright'),
-    font:token('sans'),mono:token('mono')}
-}
-
-function paintNode(ctx:CanvasRenderingContext2D,node:Projected,label:boolean,selected:boolean,material:ReturnType<typeof readMaterial>) {
-  const {sx,sy,radius}=node
-  const square=material.theme.shape==='precision'
-  const halo=material.theme.shape==='halo'
-  const path=(size:number)=>{
-    ctx.beginPath()
-    if (square) ctx.roundRect(sx-size,sy-size,size*2,size*2,2)
-    else ctx.arc(sx,sy,size,0,Math.PI*2)
-  }
-  ctx.globalAlpha=node.alpha
-  path(radius)
-  ctx.fillStyle=node.quality?material.quality:material.node
-  if (selected && halo) {
-    ctx.shadowColor=material.ring
-    ctx.shadowBlur=13
-  }
-  ctx.fill()
-  ctx.shadowBlur=0
-  ctx.lineWidth=selected?2:1
-  ctx.strokeStyle=selected?material.ring:material.stroke
-  ctx.stroke()
-  if (selected) {
-    path(radius+4)
-    ctx.lineWidth=1.5
-    ctx.stroke()
-  }
-  if (label) {
-    ctx.font=(selected?'600 15px ':'12px ')+(square?material.mono:material.font)
-    ctx.textAlign='center'
-    const y=sy-radius-(selected?12:6)
-    ctx.strokeStyle=material.stroke
-    ctx.lineWidth=4
-    ctx.lineJoin='round'
-    ctx.strokeText(node.name,sx,y)
-    ctx.lineJoin='miter'
-    ctx.fillStyle=selected?material.ring:material.text
-    ctx.fillText(node.name,sx,y)
-  }
 }

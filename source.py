@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 VERSION = "1"
 COMPOSITION_SCHEMA = "split-meaning-v1"
+RELATION_KINDS = ("call", "reference", "data", "condition", "state", "contains", "inheritance")
 EXCLUDED = {".git", ".venv", "venv", "__pycache__", ".codex", ".tox", ".uv-cache",
             ".pytest_cache", ".mypy_cache", "node_modules", ".agent-venv"}
 
@@ -256,7 +257,7 @@ def validate_relations(units, relations):
     for edge in relations:
         if set(edge) != {"kind", "certainty", "target", "evidence", "reason"}:
             raise ValueError("Use kind, certainty, target, evidence and reason for each relation.")
-        if edge["kind"] not in {"call", "reference", "data", "condition", "state", "contains"}:
+        if edge["kind"] not in RELATION_KINDS:
             raise ValueError("Unknown relation kind.")
         certainty = edge["certainty"]
         if certainty not in {"confirmed", "candidate", "external", "unresolved"}:
@@ -266,6 +267,8 @@ def validate_relations(units, relations):
             raise ValueError("Target must be a unit in this snapshot.")
         if certainty == "confirmed" and not target:
             raise ValueError("Confirmed relations require a local target.")
+        if edge["kind"] == "inheritance" and target and units[target]["kind"] != "class":
+            raise ValueError("An inheritance target must be a class.")
         if not isinstance(edge["reason"], str) or not edge["reason"].strip():
             raise ValueError("A relation requires a reason.")
         if not isinstance(edge["evidence"], list) or not edge["evidence"]:

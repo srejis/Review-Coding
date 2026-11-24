@@ -38,7 +38,7 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
   useEffect(()=>{
     const storageScope={root,revision,profile,version}
     const worker=new Worker(new URL('./layout.worker.ts',import.meta.url),{type:'module'})
-    let active=true, ready=false, running=false, paused=false
+    let active=true, ready=false, running=false, paused=false, fitted=false
     let prior=emptyLayout(), generation=0, frame=0
     let wanted:Topology|undefined
     let received:LayoutCache|undefined
@@ -52,6 +52,10 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
       if (received) {
         const from=coordinates.current,to=received.positions
         received=undefined
+        if (!fitted && Object.keys(to).length) {
+          fitted=true
+          callbacks.current.restored(to)
+        }
         const moves=Object.entries(to).some(([id,end])=>{
           const start=from[id]
           return start && (start.x!==end.x || start.y!==end.y || start.z!==end.z)
@@ -138,7 +142,10 @@ export function useGraphLayout(scope:LayoutScope, graph:GraphView|undefined, upd
         if (paused) received={positions,pairs:cache.pairs}
         else {
           coordinates.current=positions
-          callbacks.current.restored(positions)
+          if (Object.keys(positions).length===ids.size) {
+            fitted=true
+            callbacks.current.restored(positions)
+          }
           callbacks.current.update()
         }
       }

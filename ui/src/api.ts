@@ -10,9 +10,11 @@ export type Result = { status: string; version?:string; relations: Relation[]; b
   composition?:{schema:string; blocks:{unit:string; version:string; status:string;
     source:{id:string; line:number; end:number}[]}[]};
   role: string; steps: { text: string; sites: string[] }[]; missing: string[]; unresolved: string[] } }
-export type GraphNode = {id:string; name:string; version:string; quality:boolean}
-export type GraphEdge = {source:string; target:string; dependency:boolean; kind:string;
-  certainty:string; version:string}
+export type GraphNode = {id:string; name:string; version:string; quality:boolean;
+  kind:'module'|'class'|'function'|'method'; degree:number}
+// Inheritance is stored subclass → base. The renderer reverses it for the flow.
+export type GraphEdge = {source:string; target:string; kind:'contains'|'call'|'inheritance';
+  evidence:Relation['evidence']}
 export type GraphView = {revision:string; nodes:GraphNode[]; edges:GraphEdge[];
   counts:{total:number; completed:number; partial:number}}
 export type Snapshot = { root: string; profiles: string[]; profile: string; units: Record<string, Unit>;

@@ -2,7 +2,8 @@
 import ast
 import json
 
-from source import database, encode, load_snapshot, validate_meaning, validate_relations, split_blocks
+from source import RELATION_KINDS, database, encode, load_snapshot, validate_meaning, validate_relations, split_blocks
+from source_relations import SourceRelations
 
 
 def schema(description, required=(), **properties):
@@ -21,7 +22,7 @@ def object_type(**properties):
 
 
 RELATION = object_type(
-    kind={"type": "string", "enum": ["call", "reference", "data", "condition", "state", "contains"]},
+    kind={"type": "string", "enum": list(RELATION_KINDS)},
     certainty={"type": "string", "enum": ["confirmed", "candidate", "external", "unresolved"]},
     target={"type": ["string", "null"], "description": "Exact unit ID or null. confirmed requires a local unit."},
     evidence=array(object_type(unit=STRING, line=INTEGER)), reason=STRING)
@@ -165,6 +166,14 @@ class AnalysisTools:
         if name == "submit_relations":
             relations = args["relations"]
             validate_relations(self.units, relations)
+            inheritance = [edge for edge in relations if edge["kind"] == "inheritance"]
+            if inheritance:
+                facts = SourceRelations(self.units, self.snapshot["files"])
+                for edge in inheritance:
+                    target = edge["target"] if edge["certainty"] == "confirmed" else None
+                    if not facts.inheritance(self.uid, target, edge["evidence"]):
+                        raise ValueError("Cite the assigned subclass's explicit base expression. "
+                                         "A confirmed base must resolve to the submitted class.")
             for relation in relations:
                 if any(ref["line"] not in self.read.get(ref["unit"], set())
                        for ref in relation["evidence"]):

@@ -230,7 +230,11 @@ function GraphApp() {
         </div>}
       </form>
       {!!snapshot?.profiles.length && <select aria-label="분석 프로필" value={snapshot.profile}
-        onChange={e=>{generation.current++;setProfile(e.target.value);setSnapshot(undefined)}}>
+        onChange={e=>{
+          const next=e.currentTarget.value
+          if (next===snapshot.profile) return
+          generation.current++;setProfile(next);setSnapshot(undefined)
+        }}>
         {snapshot.profiles.map(item=><option key={item} value={item}>{profileLabel(item)}</option>)}
       </select>}
       <button onClick={()=>setReset(n=>n+1)}>시점 초기화</button>
@@ -242,16 +246,19 @@ function GraphApp() {
       {scope && <Graph key={JSON.stringify(scope)} scope={scope} graph={snapshot?.graph} selected={visibleSelected}
         focus={focus} reset={reset} choose={choose} open={open} report={setError}/>}
       {!snapshot && <div className="map-empty">{revision || !loaded?'프로젝트를 불러오는 중…':'Python 프로젝트를 등록해 그래프를 시작하세요.'}</div>}
-      {snapshot && counts?.completed===0 && <div className="map-empty">
-        <div><strong>완료 0 · 부분 제출 {counts.partial}</strong>
-          <p>{counts.partial ? '부분 결과는 검색 또는 검수 창에서 열 수 있습니다.' :
-            '분석을 시작하면 완료된 의미가 이 공간에 나타납니다.'}</p>
+      {snapshot?.graph && !snapshot.graph.nodes.length && <div className="map-empty">
+        <div><strong>{counts?.completed ? '표시할 완료 노드가 없습니다.' : `완료 0 · 부분 제출 ${counts?.partial}`}</strong>
+          <p>{counts?.partial ? '부분 결과는 검색 또는 검수 창에서 열 수 있습니다.' :
+            '원본 구조 단위의 의미가 완료되면 이 공간에 나타납니다.'}</p>
         </div>
       </div>}
       <div className="map-legend" aria-label="그래프 범례">
-        <span><i className="node-ready"/>의미 완료</span>
-        <span><i className="edge-call"/>호출</span><span><i className="edge-other"/>기타 관계</span>
-        <span><i className="edge-candidate"/>후보·미해결</span><span><i className="edge-dep"/>의미 선행</span>
+        <span><i className="legend-file" aria-hidden="true"/>파일</span>
+        <span><i className="legend-call" aria-hidden="true">»</i>호출</span>
+        <span><i className="legend-class" aria-hidden="true"/>클래스</span>
+        <span><i className="legend-inheritance" aria-hidden="true">∿</i>상속</span>
+        <span><i className="legend-function" aria-hidden="true"/>함수·메서드</span>
+        <span><i className="legend-contains" aria-hidden="true"/>포함</span>
       </div>
     </section>
     </div>

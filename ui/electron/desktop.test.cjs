@@ -304,24 +304,30 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
     await main.locator('.map-footer').getByText(/173개 단위/).waitFor()
     unblock()
     const profile=await main.getByRole('combobox',{name:'분석 프로필'}).inputValue()
+    const query=new URLSearchParams({revision:other.id,profile,view:'graph'})
+    const snapshot=await fetch(origin+'/api/snapshot?'+query).then(response=>response.json())
+    const ids=snapshot.graph.nodes.map(node=>node.id).sort()
+    assert.ok(ids.length)
+    const {total,completed,partial}=snapshot.graph.counts
+    const status=new RegExp(total+'개 단위 · 완료 '+completed+' · 부분 제출 '+partial)
     const key=JSON.stringify([other.root,other.id,profile,'incremental-v1'])
     const cache=path.join(data,'graph-layouts',createHash('sha256').update(key).digest('hex')+'.json')
     async function cached() {
       for (let i=0;i<120;i++) {
         const value=await readFile(cache,'utf8').then(JSON.parse).catch(()=>null)
-        if (value && Object.keys(value.positions).length===2) return value
+        if (value && JSON.stringify(Object.keys(value.positions).sort())===JSON.stringify(ids)) return value
         await new Promise(resolve=>setTimeout(resolve,70))
       }
       throw new Error('Saved coordinates could not be loaded.')
     }
     const previous=await cached()
-    assert.match(await main.locator('.map-footer').textContent(),/173개 단위 · 완료 2 · 부분 제출 5/)
+    assert.match(await main.locator('.map-footer').textContent(),status)
     await desktop.close()
 
     desktop=await start()
     main=await desktop.firstWindow()
     await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
-    await main.locator('.map-footer').getByText(/완료 2 · 부분 제출 5/).waitFor()
+    await main.locator('.map-footer').getByText(status).waitFor()
     await main.waitForFunction(()=>{
       const canvas=document.querySelector('canvas')
       return canvas?.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((value,i)=>i%4===3&&value)
@@ -333,8 +339,8 @@ test('late snapshot responses are isolated and coordinates survive restart or ca
     desktop=await start()
     main=await desktop.firstWindow()
     await main.getByRole('combobox',{name:'프로젝트·스냅샷'}).selectOption(other.id)
-    await main.locator('.map-footer').getByText(/완료 2 · 부분 제출 5/).waitFor()
-    assert.equal(Object.keys((await cached()).positions).length,2)
+    await main.locator('.map-footer').getByText(status).waitFor()
+    assert.deepEqual(Object.keys((await cached()).positions).sort(),ids)
   } finally {
     await desktop.close().catch(()=>{})
   }
@@ -358,6 +364,7 @@ test('Windows Electron applies all three themes to existing windows and restores
     await writeFile(file,JSON.stringify(legacy))
     desktop=await start()
     const main=await desktop.firstWindow()
+    await main.emulateMedia({reducedMotion:'reduce'})
     const origin=new URL(main.url()).origin
     const project=(await fetch(origin+'/api/projects').then(r=>r.json()))
       .find(project=>path.basename(project.root)==='check_cases')
