@@ -1,0 +1,8 @@
+{
+  "name": "review-coding",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "desktop": "npm --prefix ui run desktop"
+  }
+}

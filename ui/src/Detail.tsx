@@ -1,5 +1,5 @@
 import {useMemo,useEffect, useRef, useState} from 'react'
-import {request} from './api'
+import {request,meaningSites} from './api'
 import type {Run, Snapshot} from './api'
 import {detailQuery, openProgress, profileLabel, startAnalysis} from './desktop'
 import type {NodeIdentity} from './desktop'
@@ -64,7 +64,7 @@ export default function Detail() {
   const stale=result?.status==='stale' || task?.stale
   const source=unit ? snapshot?.files[unit.file] : undefined
   const sourceLines=useMemo(()=>highlightPython(source || ''),[source])
-  const sites=new Map(unit?.sites.map(site=>[site.id,site]) || [])
+  const sites=new Map(meaningSites(unit,result).map(site=>[site.id,site]))
 
   async function openManagement() {
     setError('')
@@ -126,7 +126,14 @@ export default function Detail() {
       </>}
       {source!==undefined && <section className="detail-section">
         <button aria-expanded={sourceOpen} className="source-toggle"
-          onClick={()=>{setLines([unit.line]);setSourceOpen(value=>!value)}}>{sourceOpen?'원본 접기':'원본 펼치기'}</button>
+          onClick={()=>{
+            if (!sourceOpen && lines.length===0) {
+              const refs=[...new Set((result?.meaning.steps || []).flatMap(step=>
+                step.sites.flatMap(id=>sites.get(id)?.line || [])))].sort((a,b)=>a-b)
+              setLines(refs.length ? refs : [unit.line])
+            }
+            setSourceOpen(value=>!value)
+          }}>{sourceOpen?'원본 접기':'원본 펼치기'}</button>
         {sourceOpen && <div className="detail-source">{sourceLines.map((line,i)=>(
           <div key={i} ref={i+1===lines[0]?marked:undefined} className={lines.includes(i+1)?'evidence-line':''}>
             <span>{i+1}</span><code>{line.length ? line.map((token,index)=>token.kind ?

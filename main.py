@@ -77,6 +77,7 @@ def main():
     run = sub.add_parser("analyze")
     run.add_argument("snapshot")
     run.add_argument("--unit", help="Analyze one selected unit ID.")
+    run.add_argument("--full", action="store_true", help="Process all units continuously, preserving per-unit safety limits.")
     run.add_argument("--model")
     run.add_argument("--effort")
     run.add_argument("--limit", type=int, default=12, choices=range(1, 101), metavar="1..100")
@@ -102,7 +103,7 @@ def main():
         provider = Responses(token)
         async with provider.client:
             return await analyze(provider, db_path, args.snapshot, args.model or DEFAULT_MODEL,
-                                 args.effort or DEFAULT_EFFORT, args.limit, args.seconds, args.unit)
+                                 args.effort or DEFAULT_EFFORT, args.limit, args.seconds, args.unit, full=args.full)
     try:
         match args.command:
             case "status":

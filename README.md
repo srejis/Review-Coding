@@ -6,6 +6,9 @@ Python 코드의 역할, 실행 효과와 연결을 원본에 대응시켜 검�
 
 ## Windows 데스크톱 실행
 
+설치가 완료된 프로젝트 폴더에서 npm run desktop으로 실행합니다.
+로컬 .venv가 있으면 자동으로 사용하며, REVIEW_CODING_PYTHON으로 다른 Python을 지정할 수 있습니다.
+
 Python 3.12, Node.js 22 이상, Windows 자격 증명 관리자가 필요합니다. 저장소 루트에서
 PowerShell을 열고 다음 명령을 실행합니다.
 
@@ -115,3 +118,22 @@ v2의 실행 프로필은 별도로 기록합니다. v1에서 사용한 Codex �
 ~~~
 
 JSON에는 단계별 Trace, 대기 경로, 하위 의미 버전, 미해결 경계가 포함됩니다.
+
+
+## 단일 에이전트 전수 실험
+
+CLI analyze에 --full을 지정하면 전체 실행 시간, 시작 단위 수, 총 단계 수 제한 없이
+현재 스냅샷을 연속 처리합니다. 단위별 모델·도구 호출 한도, 요청 시간 초과와 취소는
+유지하며 단위 실패와 의존 실패를 기록하고 독립 단위를 계속 처리합니다.
+
+기존 DB를 보존하는 기준선은 저장소 루트에서 baseline.py를 사용합니다.
+
+~~~powershell
+.\.venv\Scripts\python.exe -B baseline.py --directory D:/review-experiments/rembg-baseline --root D:/project/09_The_Code/04_org_proto/97_rembg
+~~~
+
+directory는 새 실험 폴더여야 합니다. 원본 DB 백업, 실험용 DB, 고정된 Python 코드,
+로컬 변경 패치, 요청별 압축 입력·응답, 사용량, 단위 상태와 결과를 보관합니다.
+해당 폴더에 cancel.request 파일을 만들면 현재 작업을 중단합니다.
+중단 파일을 제거한 뒤 같은 명령에 --resume을 지정하면 고정 코드와 저장된 결과로 이어갑니다.
+실험 폴더에는 소스와 모델 입력이 포함됩니다.

@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState} from 'react'
-import {request} from './api'
+import {request,meaningSites} from './api'
 import {openProgress, openSettings, startAnalysis, usePreferences} from './desktop'
 import type {Project, Result, Run, Snapshot, Trace, Unit} from './api'
 
@@ -28,7 +28,8 @@ function SourcePanel({unit, source, lines}: {unit?:Unit; source:string; lines:nu
 const taskName:Record<string,string> = {
   NEW:'연결 조사 대기', CONNECTING:'연결 조사 중', WAITING_DEPENDENCIES:'하위 의미 대기',
   READY_TO_SEMANTICIZE:'의미화 준비', SEMANTICIZING:'의미화 중', SEMANTIC_PARTIAL:'부분 제출',
-  SEMANTIC_SUBMITTED:'의미 제출 · 미검수', QUALITY_VERIFIED:'독립 품질 검증 완료'
+  SEMANTIC_SUBMITTED:'의미 제출 · 미검수', QUALITY_VERIFIED:'독립 품질 검증 완료',
+  FAILED:'분석 실패', BLOCKED_DEPENDENCY:'하위 분석 실패로 중단'
 }
 
 function Findings({unit, result, snapshot, navigate, highlight}: {
@@ -57,13 +58,13 @@ function Findings({unit, result, snapshot, navigate, highlight}: {
       <h2>상세 처리</h2><ol className="steps">
       {result.meaning.steps.map((step,i) => {
         const lines = [...new Set(step.sites.flatMap(id => {
-          const line = unit.sites.find(site => site.id === id)?.line
+          const line = meaningSites(unit,result).find(site => site.id === id)?.line
           return line === undefined ? [] : [line]
         }))].sort((a,b) => a-b)
         return <li key={i}><button className="step" disabled={result.status==="stale"} onClick={()=>highlight(lines)}>{step.text}
           <small>{lines.map(line => `L${line}`).join(' · ')}</small></button></li>
       })}</ol>
-      <p className="muted">구문 대응 {unit.sites.length - result.meaning.missing.length}/{unit.sites.length} · {task?.state==="QUALITY_VERIFIED" ? "독립 품질 검증 완료" : "의미 정확도 미검수"}</p>
+      <p className="muted">구문 대응 {meaningSites(unit,result).length - result.meaning.missing.length}/{meaningSites(unit,result).length} · {task?.state==="QUALITY_VERIFIED" ? "독립 품질 검증 완료" : "의미 정확도 미검수"}</p>
       {result.dependencies?.length ? <><h2>재사용한 하위 의미</h2>{result.dependencies.map(ref=>
         <button key={ref.unit} className="chip" onClick={()=>navigate(ref.unit)}>{snapshot.units[ref.unit]?.name} · {ref.version.slice(0,8)}</button>)}</> : null}
       {result.boundaries?.length ? <><h2>미해결 경계</h2><ul>{result.boundaries.map((boundary,i)=>

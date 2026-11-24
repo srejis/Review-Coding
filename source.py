@@ -10,6 +10,7 @@ import tokenize
 from contextlib import contextmanager
 
 VERSION = "1"
+COMPOSITION_SCHEMA = "split-meaning-v1"
 EXCLUDED = {".git", ".venv", "venv", "__pycache__", ".codex", ".tox", ".uv-cache",
             ".pytest_cache", ".mypy_cache", "node_modules", ".agent-venv"}
 
@@ -85,6 +86,7 @@ def index(source, filename):
         child = unit(current["name"], "block", current["scope"], parent,
                      sites[0]["line"], max(site["end"] for site in sites))
         units[child]["sites"] = sites
+        units[child]["partition_parent"] = parent
     visit(root, module)
     for uid, current in list(units.items()):
         sites = current["sites"]
@@ -98,6 +100,7 @@ def index(source, filename):
             if chunk:
                 add_chunk(uid, current, chunk)
             current["sites"] = []
+    describe_partitions(units)
     return units
 
 
@@ -152,17 +155,86 @@ def snapshot(root, data_dir):
                                                   excluded=omitted)
 
 
+def split_blocks(units, uid):
+    """Only structural blocks belong to a composition, never nested definitions."""
+    owner = units[uid]
+    if "blocks" in owner:
+        return [units[child] for child in owner["blocks"]]
+    return sorted((unit for unit in units.values()
+                   if unit.get("kind") == "block" and unit.get("parent") == uid),
+                  key=lambda block: (block["line"], int(block["sites"][0]["id"].rsplit("/", 1)[1])))
+
+
+def describe_partitions(units):
+    # Derive the same metadata for snapshots written before the composition fix.
+    for unit in units.values():
+        unit["blocks"] = []
+    for block in units.values():
+        if block["kind"] == "block":
+            units[block["parent"]]["blocks"].append(block["id"])
+    for uid, unit in units.items():
+        unit["blocks"].sort(key=lambda child: (
+            units[child]["line"], int(units[child]["sites"][0]["id"].rsplit("/", 1)[1])))
+        for order, child in enumerate(unit["blocks"]):
+            units[child]["partition_parent"] = uid
+            units[child]["partition_order"] = order
+
+
+def composition_refs(result):
+    return result.get("meaning", {}).get("composition", {}).get("blocks", [])
+
+
+def composition_current(unit, units, results):
+    blocks = split_blocks(units, unit["id"])
+    result = results.get(unit["id"], {})
+    if not blocks or result.get("status") not in {"submitted", "partial"}:
+        return True
+    composition = result.get("meaning", {}).get("composition", {})
+    refs = composition.get("blocks", [])
+    if composition.get("schema") != COMPOSITION_SCHEMA or [ref.get("unit") for ref in refs] != [
+            block["id"] for block in blocks]:
+        return False
+    for ref in refs:
+        child = results.get(ref["unit"], {})
+        if child.get("status") not in {"submitted", "partial"} or child.get("version") != ref.get("version"):
+            return False
+        meaning = child.get("meaning", {})
+        if result["status"] == "submitted" and (
+                child["status"] != "submitted" or meaning.get("missing") or meaning.get("unresolved")):
+            return False
+    return True
+
+
 def load_snapshot(db, revision):
     row = db.execute("SELECT root, data FROM snapshot WHERE id=?", (revision,)).fetchone()
     if row is None:
         raise ValueError("Unknown snapshot.")
-    return row[0], json.loads(row[1])
+    data = json.loads(row[1])
+    describe_partitions(data["units"])
+    return row[0], data
 
 
-def validate_meaning(unit, role, steps, unresolved):
+def validate_meaning(unit, role, steps, unresolved, *, units=None, block_meanings=None):
     if not role.strip() or len(role.splitlines()) != 1:
         raise ValueError("A one-line role is required.")
+    if unit.get("blocks") and units is None:
+        raise ValueError("Split parents require their block ownership context.")
+    blocks = split_blocks(units, unit["id"]) if units else []
+    references = []
     sites = {site["id"] for site in unit["sites"]}
+    if blocks:
+        for block in blocks:
+            saved = (block_meanings or {}).get(block["id"], {})
+            if saved.get("status") not in {"submitted", "partial"} or not saved.get("version"):
+                raise ValueError("Prepare every owned block meaning before composing its parent.")
+            references.append(dict(unit=block["id"], version=saved["version"],
+                                   status=saved["status"],
+                                   sites=[site["id"] for site in block["sites"]],
+                                   source=[dict(id=site["id"], line=site["line"], end=site["end"])
+                                           for site in block["sites"]]))
+            sites.update(site["id"] for site in block["sites"])
+        if not steps and not unresolved:
+            raise ValueError("A split parent needs a substantive composition or an unresolved reason.")
     covered = set()
     for step in steps:
         if set(step) != {"text", "sites"} or not isinstance(step["text"], str) or not step["text"].strip():
@@ -173,8 +245,11 @@ def validate_meaning(unit, role, steps, unresolved):
         covered.update(refs)
     if any(not item.strip() for item in unresolved):
         raise ValueError("Give a reason for each unresolved item.")
-    return dict(role=role, steps=steps, unresolved=unresolved, missing=sorted(sites-covered),
-                review="unreviewed")
+    meaning = dict(role=role, steps=steps, unresolved=unresolved, missing=sorted(sites-covered),
+                   review="unreviewed")
+    if blocks:
+        meaning["composition"] = dict(schema=COMPOSITION_SCHEMA, blocks=references)
+    return meaning
 
 
 def validate_relations(units, relations):

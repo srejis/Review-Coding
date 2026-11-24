@@ -7,6 +7,8 @@ export type Boundary = { kind:string; unit:string|null; reason:string }
 export type Task = { state:string; waiting?:string[]; path?:string[]; cycle?:string[]; stale?:boolean }
 export type Result = { status: string; version?:string; relations: Relation[]; boundaries?:Boundary[];
   dependencies?:{unit:string; version:string}[]; meaning: {
+  composition?:{schema:string; blocks:{unit:string; version:string; status:string;
+    source:{id:string; line:number; end:number}[]}[]};
   role: string; steps: { text: string; sites: string[] }[]; missing: string[]; unresolved: string[] } }
 export type GraphNode = {id:string; name:string; version:string; quality:boolean}
 export type GraphEdge = {source:string; target:string; dependency:boolean; kind:string;
@@ -34,4 +36,8 @@ export async function request<T>(path: string, payload?: object): Promise<T> {
   const value = await response.json()
   if (!response.ok) throw new Error(value.error || response.statusText)
   return value
+}
+
+export function meaningSites(unit:Unit|undefined, result:Result|undefined) {
+  return [...(unit?.sites || []), ...(result?.meaning.composition?.blocks.flatMap(block=>block.source) || [])]
 }

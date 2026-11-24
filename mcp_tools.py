@@ -2,7 +2,7 @@
 import ast
 import json
 
-from source import database, encode, load_snapshot, validate_meaning, validate_relations
+from source import database, encode, load_snapshot, validate_meaning, validate_relations, split_blocks
 
 
 def schema(description, required=(), **properties):
@@ -64,6 +64,7 @@ class AnalysisTools:
         self.dependencies = set(dependencies or ())
         self.meaning_inputs = meaning_inputs or {}
         self.read = {}
+        self.meanings_read = set()
         self.staged = {}
         self.calls = 0
         self.trees = {}
@@ -150,6 +151,7 @@ class AnalysisTools:
             uid = self.units[args["unit"]]["id"]
             if uid not in self.meaning_inputs:
                 raise ValueError("Only prepared dependency meanings are available.")
+            self.meanings_read.add(uid)
             return self.meaning_inputs[uid]
         if name == "get_relations":
             uid = self.units[args["unit"]]["id"]
@@ -178,9 +180,15 @@ class AnalysisTools:
             self.staged["dependencies"] = sorted(set(args["dependencies"]))
         if name == "submit_meaning":
             unit = self.units[self.uid]
-            meaning = validate_meaning(unit, **args)
-            site_lines = {s["id"]: s["line"] for s in unit["sites"]}
-            if any(site_lines[site] not in self.read[self.uid]
+            blocks = split_blocks(self.units, self.uid)
+            if any(block["id"] not in self.meanings_read for block in blocks):
+                raise ValueError("Read every prepared block meaning before composing its parent.")
+            meaning = validate_meaning(unit, **args, units=self.units, block_meanings=self.meaning_inputs)
+            owners = {site["id"]: (owner["id"], site["line"])
+                      for owner in [unit, *blocks] for site in owner["sites"]}
+            parent_lines = self.read[self.uid] if blocks else set()
+            if any(owners[site][1] not in parent_lines and
+                   owners[site][1] not in self.read.get(owners[site][0], ())
                    for step in meaning["steps"] for site in step["sites"]):
                 raise ValueError("Read the cited source before submitting meaning.")
             if meaning["missing"] and not meaning["unresolved"]:
@@ -208,6 +216,14 @@ class AnalysisTools:
                  if start <= site["line"] <= end}
         effects = []
         for node in ast.walk(self.trees[file]):
+            if unit["kind"] == "block" and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                    site = sites.get((first.lineno, first.col_offset))
+                    if site is not None:
+                        effects.append(dict(site=site, facts=[
+                            "This leading string is function documentation (__doc__), not an operation evaluated on each call."
+                        ]))
             if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
                 continue
             site = sites.get((node.lineno, node.col_offset))

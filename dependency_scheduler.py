@@ -1,5 +1,5 @@
 """Iterative dependency scheduling over the graph discovered so far."""
-from dependency_store import TERMINAL
+from dependency_store import TERMINAL, FAILURES
 
 
 def components(graph):
@@ -39,8 +39,10 @@ def components(graph):
     return assigned
 
 
-def next_action(root, states, deps):
+def next_action(root, states, deps, partitions=None):
     """Return one phase, its dependency path, waiting frames, and SCC members."""
+    partitions = partitions or {}
+    terminal = TERMINAL | FAILURES
     groups = components(deps)
     stack = [(root, (root,), False)]
     seen, waiting = set(), {}
@@ -50,14 +52,16 @@ def next_action(root, states, deps):
         cycle = group if len(group) > 1 or uid in deps.get(uid, ()) else ()
         ordered = (uid, *(member for member in group if member != uid))
         if after_children:
-            for member in ordered:
-                if states.get(member) not in TERMINAL:
+            # A block may call its owning function recursively. Compose the parent
+            # after the blocks even when they share a runtime dependency SCC.
+            for member in sorted(ordered, key=lambda member: bool(partitions.get(member))):
+                if states.get(member) not in terminal:
                     return "semantic", member, path if member == uid else (*path, member), waiting, cycle
             continue
         if group in seen:
             continue
         seen.add(group)
-        if all(states.get(member) in TERMINAL for member in group):
+        if all(states.get(member) in terminal for member in group):
             continue
         for member in ordered:
             if member not in deps or states.get(member) in {"NEW", "CONNECTING"}:
@@ -65,7 +69,7 @@ def next_action(root, states, deps):
         children = {}
         for member in ordered:
             for target in deps[member]:
-                if target not in group and states.get(target) not in TERMINAL:
+                if target not in group and states.get(target) not in terminal:
                     children.setdefault(target, member)
                     waiting.setdefault(member, []).append(target)
         stack.append((uid, path, True))

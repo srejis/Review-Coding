@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
 const { spawn } = require('node:child_process')
+const { existsSync } = require('node:fs')
 const path = require('node:path')
 const { createHash, randomUUID } = require('node:crypto')
 const { mkdir, readFile, rename, writeFile, unlink } = require('node:fs/promises')
@@ -14,7 +15,8 @@ const secondary = new Map()
 let origin, service, mainWindow, quitting = false
 
 function startService() {
-  const python = process.env.REVIEW_CODING_PYTHON || 'python'
+  const localPython = path.join(backendRoot, '.venv', 'Scripts', 'python.exe')
+  const python = process.env.REVIEW_CODING_PYTHON || (existsSync(localPython) ? localPython : 'python')
   const args = ['-B', path.join(backendRoot, 'main.py')]
   if (process.env.REVIEW_CODING_DATA) args.push('--data', process.env.REVIEW_CODING_DATA)
   args.push('review', '--port', '0', '--no-browser')

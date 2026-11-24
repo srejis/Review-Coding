@@ -1,9 +1,11 @@
 """Persistent dependency checkpoints and source-version invalidation."""
 import json
 
-from source import database, digest, encode, load_snapshot
+from source import (database, digest, encode, load_snapshot, split_blocks,
+                    composition_refs, composition_current, validate_meaning)
 
 TERMINAL = {"SEMANTIC_SUBMITTED", "SEMANTIC_PARTIAL", "QUALITY_VERIFIED"}
+FAILURES = {"FAILED", "BLOCKED_DEPENDENCY"}
 ENGINE = "python-dependency-v3"
 
 
@@ -18,6 +20,11 @@ def read_state(db, revision, profile):
         deps[uid].append(target)
     results = {uid: json.loads(raw) for uid, raw in db.execute(
         "SELECT unit,data FROM result WHERE snapshot=? AND profile=?", key)}
+    _, snapshot = load_snapshot(db, revision)
+    for uid in connections:
+        # Structural prerequisites are derived from ownership, not model relations.
+        blocks = [block["id"] for block in split_blocks(snapshot["units"], uid)]
+        deps[uid] = list(dict.fromkeys([*blocks, *deps[uid]]))
     return tasks, connections, deps, results
 
 
@@ -27,7 +34,19 @@ class Checkpoints:
 
     def read(self):
         with database(self.path) as db:
-            return read_state(db, self.revision, self.profile)
+            state = read_state(db, self.revision, self.profile)
+            _, snapshot = load_snapshot(db, self.revision)
+            invalid = {uid for uid, unit in snapshot["units"].items()
+                       if not composition_current(unit, snapshot["units"], state[3])}
+            if invalid:
+                consumers = {uid: [ref["unit"] for ref in [
+                    *saved.get("dependencies", []), *composition_refs(saved)]]
+                    for uid, saved in state[3].items()}
+                for uid in ancestors(consumers, invalid):
+                    mark_stale(db, self.revision, self.profile, uid, state[3].get(uid),
+                               keep_connections=True)
+                state = read_state(db, self.revision, self.profile)
+            return state
 
     def state(self, uid, state, **metadata):
         with database(self.path) as db:
@@ -50,16 +69,31 @@ class Checkpoints:
             set_state(db, self.revision, self.profile, uid, "NEW", {"revisit": target})
 
     def semanticize(self, uid, meaning, connections, refs, boundaries, reads):
-        status = "partial" if meaning["missing"] or meaning["unresolved"] or boundaries else "submitted"
-        result = dict(status=status, relations=connections["relations"], meaning=meaning,
-                      dependencies=refs, boundaries=boundaries, reads=sorted(reads))
-        result["version"] = digest(encode(result).encode())
         key = (self.revision, self.profile)
         with database(self.path) as db:
+            # Keep version validation and the parent commit in the same write transaction.
+            db.execute("BEGIN IMMEDIATE")
             _, _, deps, results = read_state(db, *key)
+            _, snapshot = load_snapshot(db, self.revision)
+            blocks = split_blocks(snapshot["units"], uid)
+            if blocks:
+                validated = validate_meaning(snapshot["units"][uid],
+                    meaning["role"], meaning["steps"], meaning["unresolved"],
+                    units=snapshot["units"], block_meanings=results)
+                if meaning.get("composition") != validated.get("composition"):
+                    raise ValueError("Block meaning versions changed before parent submission.")
+                meaning = validated
+            partial_blocks = any(results[block["id"]]["status"] != "submitted" or
+                                 results[block["id"]]["meaning"]["missing"] or
+                                 results[block["id"]]["meaning"]["unresolved"] for block in blocks)
+            status = "partial" if meaning["missing"] or meaning["unresolved"] or boundaries or partial_blocks else "submitted"
+            result = dict(status=status, relations=connections["relations"], meaning=meaning,
+                          dependencies=refs, boundaries=boundaries, reads=sorted(reads))
+            result["version"] = digest(encode(result).encode())
             previous = results.get(uid)
             if previous and previous.get("version") != result["version"]:
-                consumers = {parent: [ref["unit"] for ref in saved.get("dependencies", ())]
+                consumers = {parent: [ref["unit"] for ref in [
+                    *saved.get("dependencies", ()), *composition_refs(saved)]]
                              for parent, saved in results.items()}
                 for parent in ancestors(consumers, {uid}) - {uid}:
                     if results[parent].get("status") in {"submitted", "partial"}:
@@ -143,7 +177,10 @@ def inherit(db, revision, root, snapshot):
                 continue
             if uid in connections:
                 save_connection(db, revision, profile, uid,
-                                dict(connections[uid], dependencies=deps[uid]), connections[uid]["reads"])
+                                dict(connections[uid], dependencies=[
+                                    target for target in deps[uid]
+                                    if target not in {block["id"] for block in split_blocks(units, uid)}]),
+                                connections[uid]["reads"])
             if result:
                 db.execute("INSERT OR REPLACE INTO result VALUES(?,?,?,?)",
                            (revision, profile, uid, encode(result)))

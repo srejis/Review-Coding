@@ -1,11 +1,12 @@
 """Derive the renderable graph from committed meanings in one snapshot/profile."""
-from source import digest, encode
+from source import digest, encode, composition_refs, composition_current
 
 
 def completed_graph(revision, units, results, tasks):
     valid = {uid: result for uid, result in results.items()
              if uid in units and result["status"] == "submitted" and result.get("meaning")
-             and not tasks.get(uid, {}).get("stale")}
+             and not tasks.get(uid, {}).get("stale")
+             and composition_current({"id":uid}, units, results)}
     # Defend against version mismatches even if an interrupted writer left a prior submission.
     versions = {uid: result.get("version") or digest(encode(result).encode())
                 for uid, result in results.items()
@@ -14,7 +15,7 @@ def completed_graph(revision, units, results, tasks):
     consumers = {}
     invalid = set()
     for uid, result in valid.items():
-        for ref in result.get("dependencies", ()):
+        for ref in [*result.get("dependencies", ()), *composition_refs(result)]:
             consumers.setdefault(ref["unit"], []).append(uid)
             if versions.get(ref["unit"]) != ref["version"]:
                 invalid.add(uid)
